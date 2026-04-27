@@ -413,7 +413,7 @@ func (m Model) selectionRange() (sl, sc, el, ec int) {
 // down starts a selection at the cursor; motion extends it; release copies
 // the selected text to the clipboard (or clears the empty selection if it
 // was just a click).
-func (m Model) handleMouse(mm tea.MouseMsg) tea.Model {
+func (m Model) handleMouse(mm tea.MouseMsg) Model {
 	e := mm.Mouse()
 	cx, cy := m.screenToContent(e.X, e.Y)
 	switch ev := mm.(type) {
@@ -487,175 +487,18 @@ func (m Model) anyRunRunning() bool {
 	return false
 }
 
+// Update is the Bubble Tea entry point. It dispatches into focused
+// sub-handlers (one per major message family) and ends with a fallthrough
+// that lets the textarea + viewport see whatever no specific handler claimed.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := m.updateAppMsg(msg); handled {
+		return next, cmd
+	}
+	if next, cmd, handled := m.updateMouse(msg); handled {
+		return next, cmd
+	}
+
 	var cmds []tea.Cmd
-	var cmd tea.Cmd
-
-	switch v := msg.(type) {
-	case CloseDialogMsg:
-		m.overlay.CloseTop()
-		return m, nil
-	case ConfirmQuitMsg:
-		return m, tea.Quit
-	case OpenRunEditMsg:
-		cwd := m.initialCwd
-		if cur := m.manager.Current(); cur != nil {
-			cwd = cur.Cwd
-		}
-		return m, m.overlay.Open(NewRunEditDialog(cwd, m.styles))
-	case OpenRunLogsMsg:
-		if m.runs != nil {
-			if r := m.runs.Get(v.ID); r != nil {
-				return m, m.overlay.Open(NewRunLogsDialog(r, m.styles))
-			}
-		}
-		return m, nil
-	case CreateRunMsg:
-		m.overlay.CloseTop()
-		if m.runs != nil {
-			r := m.runs.Add(v.Name, v.Command, v.Cwd)
-			if err := m.runs.Save(); err != nil {
-				m.logger.Warn("save runs", "err", err)
-			}
-			m.logger.Info("run created", "id", r.ID, "name", r.Name)
-			// Reopen the runs list so the user can act on the new entry.
-			return m, m.overlay.Open(NewRunsDialog(m.runs, m.styles))
-		}
-		return m, nil
-	case DeleteRunMsg:
-		if m.runs != nil {
-			m.runs.Remove(v.ID)
-			if err := m.runs.Save(); err != nil {
-				m.logger.Warn("save runs", "err", err)
-			}
-		}
-		return m, nil
-	case CreatePaneMsg:
-		m.overlay.CloseTop()
-		if m.panes == nil {
-			m.panes = terminal.NewManager()
-		}
-		mainW, mainH := m.paneSize()
-		p, err := terminal.Spawn(v.Name, v.Command, v.Cwd, mainW, mainH)
-		if err != nil {
-			m.lastErr = err
-			m.logger.Error("spawn pane failed", "err", err, "cmd", v.Command)
-			return m, nil
-		}
-		m.panes.Add(p)
-		m.activeKind = activePane
-		m.saveState()
-		m.logger.Info("pane spawned", "id", p.ID, "name", p.Title, "cmd", p.Command)
-		return m, readPaneCmd(p)
-	case ClosePaneMsg:
-		if m.panes != nil {
-			m.panes.Close(v.ID)
-			if m.panes.Len() == 0 {
-				m.activeKind = activeClaude
-			}
-			m.saveState()
-		}
-		return m, nil
-	case SwitchTabMsg:
-		m.overlay.CloseTop()
-		switch v.Kind {
-		case "claude":
-			m.activeKind = activeClaude
-			m.manager.Active = v.Index
-			if cur := m.manager.Current(); cur != nil {
-				m.textarea.SetValue(cur.Draft)
-				m.textarea.CursorEnd()
-				m.layout()
-				m.refreshViewport()
-				m.viewport.GotoBottom()
-			}
-		case "pane":
-			if m.panes != nil {
-				m.activeKind = activePane
-				m.panes.SetActive(v.Index)
-				if p := m.activePane(); p != nil {
-					w, h := m.paneSize()
-					p.Resize(w, h)
-				}
-			}
-		}
-		return m, nil
-	case paneOutputMsg:
-		// vt10x already received the bytes inside ReadOnce; just re-arm the
-		// reader so the next chunk gets pumped.
-		if m.panes != nil {
-			if p := m.panes.ByID(v.PaneID); p != nil {
-				return m, readPaneCmd(p)
-			}
-		}
-		return m, nil
-	case paneClosedMsg:
-		if m.panes != nil {
-			m.panes.Close(v.PaneID)
-			if m.panes.Len() == 0 {
-				m.activeKind = activeClaude
-			}
-		}
-		return m, nil
-	case CreateSessionMsg:
-		m.overlay.CloseTop()
-		if v.Model != "" {
-			m.defaultModel = v.Model
-		}
-		if v.Effort != "" {
-			m.defaultEffort = v.Effort
-		}
-		// Save current draft before switching to the new session.
-		if cur := m.manager.Current(); cur != nil {
-			cur.Draft = m.textarea.Value()
-		}
-		s, err := session.New(m.ctx, v.Cwd, session.Options{
-			Logger:                   m.logger,
-			Model:                    v.Model,
-			Effort:                   v.Effort,
-			DangerousSkipPermissions: m.skipPerms,
-		})
-		if err != nil {
-			m.lastErr = err
-			m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
-			return m, nil
-		}
-		m.manager.Add(s)
-		m.textarea.Reset() // new session starts with empty draft
-		m.layout()
-		m.refreshViewport()
-		m.saveState()
-		return m, waitForSession(s)
-	case RenameSessionMsg:
-		m.overlay.CloseTop()
-		if cur := m.manager.Current(); cur != nil {
-			cur.Title = v.NewTitle
-			m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
-		}
-		m.saveState()
-		return m, nil
-	}
-
-	// Wheel events scroll the chat. Click/Motion/Release implement
-	// Crush-style drag-to-select-and-copy in the chat region (see
-	// internal/highlight + Crush's HandleMouseDown/Drag/Up).
-	if mm, isWheel := msg.(tea.MouseWheelMsg); isWheel {
-		if !m.overlay.HasOpen() {
-			m.viewport, cmd = m.viewport.Update(mm)
-			cmds = append(cmds, cmd)
-		}
-		return m, tea.Batch(cmds...)
-	}
-	if mm, ok := msg.(tea.MouseMsg); ok {
-		// In overlays, pane mode, or when the user has explicitly switched
-		// to terminal-native selection, our app-level handler stays out of
-		// the way.
-		if m.overlay.HasOpen() || m.activeKind == activePane || m.selectMode {
-			return m, nil
-		}
-		return m.handleMouse(mm), nil
-	}
-
 	if m.overlay.HasOpen() {
 		if _, isKey := msg.(tea.KeyMsg); isKey {
 			return m, m.overlay.UpdateTop(msg)
@@ -665,194 +508,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.layout()
-		m.md = nil
-		m.mdCache = nil
-		m.refreshViewport()
-		// Resize the active pane (if any) so the embedded child gets SIGWINCH.
-		if p := m.activePane(); p != nil {
-			w, h := m.paneSize()
-			p.Resize(w, h)
-		}
-		m.ready = true
-
+		m.applyResize(msg)
 	case tea.KeyMsg:
-		// MASTER shortcuts always take precedence — even when a pane is
-		// active they're how the user navigates back out / opens dialogs.
-		switch {
-		case key.Matches(msg, m.keymap.Quit):
-			return m, m.openQuitDialog()
-		case key.Matches(msg, m.keymap.NewPane):
-			d := NewNewPaneDialog(m.initialCwd, m.styles)
-			return m, m.overlay.Open(d)
-		case key.Matches(msg, m.keymap.TilePicker):
-			items := m.collectTiles()
-			d := NewTilePickerDialog(items, m.styles)
-			return m, m.overlay.Open(d)
-		case key.Matches(msg, m.keymap.SelectMode):
-			// Toggle mouse capture: when off, the terminal regains native
-			// drag-to-select. The View() reads m.selectMode each frame and
-			// sets MouseMode accordingly.
-			m.selectMode = !m.selectMode
-			return m, nil
-		case key.Matches(msg, m.keymap.NewSession):
-			d := NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)
-			return m, m.overlay.Open(d)
-		case key.Matches(msg, m.keymap.Runs):
-			if m.runs == nil {
-				return m, nil
-			}
-			return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick)
-		case key.Matches(msg, m.keymap.NextSession):
-			m.cycleTab(1)
-			return m, nil
-		case key.Matches(msg, m.keymap.PrevSession):
-			m.cycleTab(-1)
-			return m, nil
-		}
-
-		// If a terminal pane has focus, all other keys are forwarded to its
-		// PTY (translated to xterm bytes). The pane-only Esc/Ctrl+W still
-		// fall through master switch above.
-		if p := m.activePane(); p != nil {
-			if pk, ok := msg.(tea.KeyPressMsg); ok {
-				if b := terminal.KeyToBytes(pk); b != nil {
-					if err := p.Send(b); err != nil {
-						m.logger.Debug("pane send failed", "err", err, "pane", p.ID)
-					}
-				}
-			}
-			return m, nil
-		}
-
-		// Below: claude-session-only keys.
-		switch {
-		case key.Matches(msg, m.keymap.ClearOrCancel):
-			if !m.lastCtrlC.IsZero() && time.Since(m.lastCtrlC) < ctrlCDoubleWin {
-				// Second press → cancel current turn.
-				m.lastCtrlC = time.Time{}
-				cur := m.manager.Current()
-				if cur != nil && cur.State == session.StateThinking {
-					if err := cur.Cancel(); err != nil {
-						cur.LastErr = err
-					}
-				}
-			} else {
-				// First press → clear textarea, start the double-press timer.
-				m.textarea.Reset()
-				if cur := m.manager.Current(); cur != nil {
-					cur.Draft = ""
-				}
-				m.lastCtrlC = time.Now()
-				m.layout()
-			}
-			return m, nil
-		case key.Matches(msg, m.keymap.Rename):
-			cur := m.manager.Current()
-			if cur != nil {
-				d := NewRenameDialog(cur.Title, m.styles)
-				return m, m.overlay.Open(d)
-			}
-			return m, nil
-		case key.Matches(msg, m.keymap.CloseSession):
-			// In claude mode close the active session; in pane mode close
-			// the active pane.
-			if m.activeKind == activePane && m.panes != nil {
-				if p := m.panes.Current(); p != nil {
-					m.panes.Close(p.ID)
-					if m.panes.Len() == 0 {
-						m.activeKind = activeClaude
-					}
-				}
-			} else {
-				cur := m.manager.Current()
-				if cur != nil {
-					m.manager.Close(cur.ID)
-					if next := m.manager.Current(); next != nil {
-						m.textarea.SetValue(next.Draft)
-						m.textarea.CursorEnd()
-					} else {
-						m.textarea.Reset()
-					}
-					m.layout()
-					m.refreshViewport()
-				}
-			}
-			m.saveState()
-			return m, nil
-		case key.Matches(msg, m.keymap.Send):
-			cur := m.manager.Current()
-			if cur == nil || cur.State != session.StateIdle {
-				return m, nil
-			}
-			value := m.textarea.Value()
-			// Crush pattern: trailing backslash escapes Enter to a newline
-			// (so users can compose multiline messages without Shift+Enter).
-			if before, ok := strings.CutSuffix(value, "\\"); ok {
-				m.textarea.SetValue(before + "\n")
-				m.textarea.CursorEnd()
-				m.layout()
-				return m, nil
-			}
-			text := strings.TrimSpace(value)
-			if text == "" {
-				return m, nil
-			}
-			m.textarea.Reset()
-			cur.Draft = ""
-			if err := cur.Send(text); err != nil {
-				cur.LastErr = err
-			}
-			m.layout()
-			m.refreshViewport()
-			m.viewport.GotoBottom()
-			// Kick off both the spinner tick chain and the morphing-string
-			// anim. Each fires its own re-arm message; they die when the
-			// session goes back to idle.
-			return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
-		}
-
+		next, cmd := m.updateKey(msg)
+		// updateKey never falls through to textarea/viewport — it always
+		// owns its key fully (or no-ops).
+		return next, cmd
 	case sessionEventMsg:
-		sess := m.manager.ByID(msg.SessionID)
-		if sess != nil {
-			sess.HandleEvent(msg.Event)
-			if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
-				m.refreshViewport()
-				m.viewport.GotoBottom()
-			}
-			cmds = append(cmds, waitForSession(sess))
-		}
-
+		cmds = append(cmds, m.handleSessionEvent(msg))
 	case sessionClosedMsg:
 		m.manager.Close(msg.SessionID)
 		m.refreshViewport()
-
 	case spinner.TickMsg:
-		// Keep ticking while any session is thinking OR any run is alive
-		// (so the logs viewer auto-tails) OR a modal that wants live data
-		// is open.
-		if !m.anyThinking() && !m.anyRunRunning() && !m.overlay.HasOpen() {
-			return m, tea.Batch(cmds...)
-		}
-		m.spinner, cmd = m.spinner.Update(msg)
+		next, cmd := m.handleSpinnerTick(msg)
+		m = next
 		cmds = append(cmds, cmd)
-		if cur := m.manager.Current(); cur != nil && cur.State == session.StateThinking {
-			m.refreshViewport()
-		}
 	case anim.StepMsg:
-		// Morphing-string spinner — only re-arm while at least one session
-		// is actively thinking. Crush calls this its anim.Anim cycle.
-		if msg.ID == m.thinkingAnim.ID() {
-			m.thinkingAnim.Tick()
-			if m.anyThinking() {
-				cmds = append(cmds, m.thinkingAnim.Step())
-				m.refreshViewport()
-			}
-		}
+		cmds = append(cmds, m.handleAnimStep(msg))
 	}
 
 	if !m.overlay.HasOpen() {
+		var cmd tea.Cmd
 		prevValue := m.textarea.Value()
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
@@ -864,6 +540,393 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// updateAppMsg handles in-app messages emitted by dialogs and other
+// sub-models (close/quit/run/pane/session creation, etc.). It owns its
+// messages — when handled is true the caller MUST return immediately.
+func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
+	switch v := msg.(type) {
+	case CloseDialogMsg:
+		m.overlay.CloseTop()
+		return m, nil, true
+	case ConfirmQuitMsg:
+		return m, tea.Quit, true
+	case OpenRunEditMsg:
+		cwd := m.initialCwd
+		if cur := m.manager.Current(); cur != nil {
+			cwd = cur.Cwd
+		}
+		return m, m.overlay.Open(NewRunEditDialog(cwd, m.styles)), true
+	case OpenRunLogsMsg:
+		if m.runs != nil {
+			if r := m.runs.Get(v.ID); r != nil {
+				return m, m.overlay.Open(NewRunLogsDialog(r, m.styles)), true
+			}
+		}
+		return m, nil, true
+	case CreateRunMsg:
+		m.overlay.CloseTop()
+		if m.runs == nil {
+			return m, nil, true
+		}
+		r := m.runs.Add(v.Name, v.Command, v.Cwd)
+		if err := m.runs.Save(); err != nil {
+			m.logger.Warn("save runs", "err", err)
+		}
+		m.logger.Info("run created", "id", r.ID, "name", r.Name)
+		// Reopen the runs list so the user can act on the new entry.
+		return m, m.overlay.Open(NewRunsDialog(m.runs, m.styles)), true
+	case DeleteRunMsg:
+		if m.runs != nil {
+			m.runs.Remove(v.ID)
+			if err := m.runs.Save(); err != nil {
+				m.logger.Warn("save runs", "err", err)
+			}
+		}
+		return m, nil, true
+	case CreatePaneMsg:
+		return m.createPane(v)
+	case ClosePaneMsg:
+		if m.panes != nil {
+			m.panes.Close(v.ID)
+			if m.panes.Len() == 0 {
+				m.activeKind = activeClaude
+			}
+			m.saveState()
+		}
+		return m, nil, true
+	case SwitchTabMsg:
+		m.overlay.CloseTop()
+		m.switchToTab(v.Kind, v.Index)
+		return m, nil, true
+	case paneOutputMsg:
+		// vt10x already received the bytes inside ReadOnce; just re-arm the
+		// reader so the next chunk gets pumped.
+		if m.panes != nil {
+			if p := m.panes.ByID(v.PaneID); p != nil {
+				return m, readPaneCmd(p), true
+			}
+		}
+		return m, nil, true
+	case paneClosedMsg:
+		if m.panes != nil {
+			m.panes.Close(v.PaneID)
+			if m.panes.Len() == 0 {
+				m.activeKind = activeClaude
+			}
+		}
+		return m, nil, true
+	case CreateSessionMsg:
+		return m.createSession(v)
+	case RenameSessionMsg:
+		m.overlay.CloseTop()
+		if cur := m.manager.Current(); cur != nil {
+			cur.Title = v.NewTitle
+			m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
+		}
+		m.saveState()
+		return m, nil, true
+	}
+	return m, nil, false
+}
+
+func (m Model) createPane(v CreatePaneMsg) (Model, tea.Cmd, bool) {
+	m.overlay.CloseTop()
+	if m.panes == nil {
+		m.panes = terminal.NewManager()
+	}
+	mainW, mainH := m.paneSize()
+	p, err := terminal.Spawn(v.Name, v.Command, v.Cwd, mainW, mainH)
+	if err != nil {
+		m.lastErr = err
+		m.logger.Error("spawn pane failed", "err", err, "cmd", v.Command)
+		return m, nil, true
+	}
+	m.panes.Add(p)
+	m.activeKind = activePane
+	m.saveState()
+	m.logger.Info("pane spawned", "id", p.ID, "name", p.Title, "cmd", p.Command)
+	return m, readPaneCmd(p), true
+}
+
+func (m Model) createSession(v CreateSessionMsg) (Model, tea.Cmd, bool) {
+	m.overlay.CloseTop()
+	if v.Model != "" {
+		m.defaultModel = v.Model
+	}
+	if v.Effort != "" {
+		m.defaultEffort = v.Effort
+	}
+	// Save current draft before switching to the new session.
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = m.textarea.Value()
+	}
+	s, err := session.New(m.ctx, v.Cwd, session.Options{
+		Logger:                   m.logger,
+		Model:                    v.Model,
+		Effort:                   v.Effort,
+		DangerousSkipPermissions: m.skipPerms,
+	})
+	if err != nil {
+		m.lastErr = err
+		m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
+		return m, nil, true
+	}
+	m.manager.Add(s)
+	m.textarea.Reset() // new session starts with empty draft
+	m.layout()
+	m.refreshViewport()
+	m.saveState()
+	return m, waitForSession(s), true
+}
+
+func (m *Model) switchToTab(kind string, index int) {
+	switch kind {
+	case "claude":
+		m.activeKind = activeClaude
+		m.manager.Active = index
+		if cur := m.manager.Current(); cur != nil {
+			m.textarea.SetValue(cur.Draft)
+			m.textarea.CursorEnd()
+			m.layout()
+			m.refreshViewport()
+			m.viewport.GotoBottom()
+		}
+	case "pane":
+		if m.panes != nil {
+			m.activeKind = activePane
+			m.panes.SetActive(index)
+			if p := m.activePane(); p != nil {
+				w, h := m.paneSize()
+				p.Resize(w, h)
+			}
+		}
+	}
+}
+
+// updateMouse routes mouse events. Wheel scrolls the viewport; click/motion
+// /release drive the app-level drag-to-select-and-copy. Returns handled=true
+// only for genuine MouseMsg values — other messages fall through unchanged.
+func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
+	if mm, isWheel := msg.(tea.MouseWheelMsg); isWheel {
+		var cmd tea.Cmd
+		if !m.overlay.HasOpen() {
+			m.viewport, cmd = m.viewport.Update(mm)
+		}
+		return m, cmd, true
+	}
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		// In overlays, pane mode, or when the user has explicitly switched
+		// to terminal-native selection, our app-level handler stays out of
+		// the way.
+		if m.overlay.HasOpen() || m.activeKind == activePane || m.selectMode {
+			return m, nil, true
+		}
+		return m.handleMouse(mm), nil, true
+	}
+	return m, nil, false
+}
+
+func (m *Model) applyResize(msg tea.WindowSizeMsg) {
+	m.width, m.height = msg.Width, msg.Height
+	m.layout()
+	m.md = nil
+	m.mdCache = nil
+	m.refreshViewport()
+	// Resize the active pane (if any) so the embedded child gets SIGWINCH.
+	if p := m.activePane(); p != nil {
+		w, h := m.paneSize()
+		p.Resize(w, h)
+	}
+	m.ready = true
+}
+
+// updateKey is the tea.KeyMsg dispatcher: master shortcuts → pane-forwarding
+// → claude-session keys. Owns the key event fully; never falls through to
+// textarea/viewport (the textarea consumes characters via the master Update
+// loop's fallthrough only for non-key events).
+func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	// MASTER shortcuts always take precedence — even when a pane is
+	// active they're how the user navigates back out / opens dialogs.
+	switch {
+	case key.Matches(msg, m.keymap.Quit):
+		return m, m.openQuitDialog()
+	case key.Matches(msg, m.keymap.NewPane):
+		return m, m.overlay.Open(NewNewPaneDialog(m.initialCwd, m.styles))
+	case key.Matches(msg, m.keymap.TilePicker):
+		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles))
+	case key.Matches(msg, m.keymap.SelectMode):
+		// Toggle mouse capture: when off, the terminal regains native
+		// drag-to-select. The View() reads m.selectMode each frame and
+		// sets MouseMode accordingly.
+		m.selectMode = !m.selectMode
+		return m, nil
+	case key.Matches(msg, m.keymap.NewSession):
+		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles))
+	case key.Matches(msg, m.keymap.Runs):
+		if m.runs == nil {
+			return m, nil
+		}
+		return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick)
+	case key.Matches(msg, m.keymap.NextSession):
+		m.cycleTab(1)
+		return m, nil
+	case key.Matches(msg, m.keymap.PrevSession):
+		m.cycleTab(-1)
+		return m, nil
+	}
+
+	// If a terminal pane has focus, all other keys are forwarded to its
+	// PTY (translated to xterm bytes). The pane-only Esc/Ctrl+W still
+	// fall through master switch above.
+	if p := m.activePane(); p != nil {
+		if pk, ok := msg.(tea.KeyPressMsg); ok {
+			if b := terminal.KeyToBytes(pk); b != nil {
+				if err := p.Send(b); err != nil {
+					m.logger.Debug("pane send failed", "err", err, "pane", p.ID)
+				}
+			}
+		}
+		return m, nil
+	}
+
+	// Below: claude-session-only keys.
+	switch {
+	case key.Matches(msg, m.keymap.ClearOrCancel):
+		m.handleClearOrCancel()
+		return m, nil
+	case key.Matches(msg, m.keymap.Rename):
+		if cur := m.manager.Current(); cur != nil {
+			return m, m.overlay.Open(NewRenameDialog(cur.Title, m.styles))
+		}
+		return m, nil
+	case key.Matches(msg, m.keymap.CloseSession):
+		m.handleCloseTab()
+		return m, nil
+	case key.Matches(msg, m.keymap.Send):
+		return m.handleSend()
+	}
+	return m, nil
+}
+
+func (m *Model) handleClearOrCancel() {
+	if !m.lastCtrlC.IsZero() && time.Since(m.lastCtrlC) < ctrlCDoubleWin {
+		// Second press → cancel current turn.
+		m.lastCtrlC = time.Time{}
+		cur := m.manager.Current()
+		if cur != nil && cur.State == session.StateThinking {
+			if err := cur.Cancel(); err != nil {
+				cur.LastErr = err
+			}
+		}
+		return
+	}
+	// First press → clear textarea, start the double-press timer.
+	m.textarea.Reset()
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = ""
+	}
+	m.lastCtrlC = time.Now()
+	m.layout()
+}
+
+func (m *Model) handleCloseTab() {
+	if m.activeKind == activePane && m.panes != nil {
+		if p := m.panes.Current(); p != nil {
+			m.panes.Close(p.ID)
+			if m.panes.Len() == 0 {
+				m.activeKind = activeClaude
+			}
+		}
+		m.saveState()
+		return
+	}
+	cur := m.manager.Current()
+	if cur != nil {
+		m.manager.Close(cur.ID)
+		if next := m.manager.Current(); next != nil {
+			m.textarea.SetValue(next.Draft)
+			m.textarea.CursorEnd()
+		} else {
+			m.textarea.Reset()
+		}
+		m.layout()
+		m.refreshViewport()
+	}
+	m.saveState()
+}
+
+func (m Model) handleSend() (Model, tea.Cmd) {
+	cur := m.manager.Current()
+	if cur == nil || cur.State != session.StateIdle {
+		return m, nil
+	}
+	value := m.textarea.Value()
+	// Crush pattern: trailing backslash escapes Enter to a newline (so users
+	// can compose multiline messages without Shift+Enter).
+	if before, ok := strings.CutSuffix(value, "\\"); ok {
+		m.textarea.SetValue(before + "\n")
+		m.textarea.CursorEnd()
+		m.layout()
+		return m, nil
+	}
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return m, nil
+	}
+	m.textarea.Reset()
+	cur.Draft = ""
+	if err := cur.Send(text); err != nil {
+		cur.LastErr = err
+	}
+	m.layout()
+	m.refreshViewport()
+	m.viewport.GotoBottom()
+	// Kick off both the spinner tick chain and the morphing-string anim.
+	// Each fires its own re-arm message; they die when the session goes back
+	// to idle.
+	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
+}
+
+func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
+	sess := m.manager.ByID(msg.SessionID)
+	if sess == nil {
+		return nil
+	}
+	sess.HandleEvent(msg.Event)
+	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+	}
+	return waitForSession(sess)
+}
+
+// handleSpinnerTick keeps ticking while any session is thinking OR any run
+// is alive (so the logs viewer auto-tails) OR a modal that wants live data
+// is open.
+func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
+	if !m.anyThinking() && !m.anyRunRunning() && !m.overlay.HasOpen() {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+	if cur := m.manager.Current(); cur != nil && cur.State == session.StateThinking {
+		m.refreshViewport()
+	}
+	return m, cmd
+}
+
+func (m *Model) handleAnimStep(msg anim.StepMsg) tea.Cmd {
+	if msg.ID != m.thinkingAnim.ID() {
+		return nil
+	}
+	m.thinkingAnim.Tick()
+	if !m.anyThinking() {
+		return nil
+	}
+	m.refreshViewport()
+	return m.thinkingAnim.Step()
 }
 
 func (m Model) openQuitDialog() tea.Cmd {
