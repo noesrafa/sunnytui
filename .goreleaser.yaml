@@ -59,5 +59,8 @@ brews:
       email: bot@goreleaser.com
     install: |
       bin.install "sunnytui"
+      # Symlink so users can launch via the short `sunny` name.
+      bin.install_symlink "sunnytui" => "sunny"
     test: |
       system "#{bin}/sunnytui", "--help"
+      system "#{bin}/sunny", "--help"

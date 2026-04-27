@@ -23,6 +23,15 @@ import (
 )
 
 func main() {
+	// Help flags are intercepted before the chat fallthrough so
+	// `sunny --help` / `sunny -h` print usage instead of opening the TUI.
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "-h", "--help":
+			printUsage()
+			return
+		}
+	}
 	// Default subcommand: chat. Lets the binary be invoked as `sunny` (or
 	// `sunnytui`) with no args, with `--cwd`, `--model`, `--effort`, etc.
 	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
