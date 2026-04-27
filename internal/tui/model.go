@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"image"
+	"io"
 	"strings"
 	"time"
 
@@ -94,11 +95,19 @@ const (
 	textareaMinH   = 3
 	textareaMaxH   = 12
 	ctrlCDoubleWin = 1500 * time.Millisecond
+	// mdCacheMax bounds the markdown render cache. Past this size we drop the
+	// whole map — long sessions otherwise grow it forever.
+	mdCacheMax = 512
 )
 
 func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts Options) Model {
 	st := DefaultStyles()
 	km := DefaultKeyMap()
+
+	logger := opts.Logger
+	if logger == nil {
+		logger = log.NewWithOptions(io.Discard, log.Options{})
+	}
 
 	// Editor — patterned exactly off Crush's textarea init at
 	// /tmp/charm-crush/internal/ui/model/ui.go:271. Same init order, same
@@ -154,7 +163,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		ctx:           ctx,
 		styles:        st,
 		keymap:        km,
-		logger:        opts.Logger,
+		logger:        logger,
 		manager:       mgr,
 		runs:          opts.Runs,
 		panes:         opts.Panes,
@@ -455,9 +464,9 @@ func (m Model) copySelection() string {
 	if text == "" {
 		return ""
 	}
-	if err := clipboard.WriteAll(text); err != nil && m.logger != nil {
+	if err := clipboard.WriteAll(text); err != nil {
 		m.logger.Warn("clipboard write failed", "err", err, "len", len(text))
-	} else if m.logger != nil {
+	} else {
 		m.logger.Info("clipboard write", "len", len(text))
 	}
 	return text
@@ -505,10 +514,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay.CloseTop()
 		if m.runs != nil {
 			r := m.runs.Add(v.Name, v.Command, v.Cwd)
-			_ = m.runs.Save()
-			if m.logger != nil {
-				m.logger.Info("run created", "id", r.ID, "name", r.Name)
+			if err := m.runs.Save(); err != nil {
+				m.logger.Warn("save runs", "err", err)
 			}
+			m.logger.Info("run created", "id", r.ID, "name", r.Name)
 			// Reopen the runs list so the user can act on the new entry.
 			return m, m.overlay.Open(NewRunsDialog(m.runs, m.styles))
 		}
@@ -516,7 +525,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case DeleteRunMsg:
 		if m.runs != nil {
 			m.runs.Remove(v.ID)
-			_ = m.runs.Save()
+			if err := m.runs.Save(); err != nil {
+				m.logger.Warn("save runs", "err", err)
+			}
 		}
 		return m, nil
 	case CreatePaneMsg:
@@ -528,17 +539,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		p, err := terminal.Spawn(v.Name, v.Command, v.Cwd, mainW, mainH)
 		if err != nil {
 			m.lastErr = err
-			if m.logger != nil {
-				m.logger.Error("spawn pane failed", "err", err, "cmd", v.Command)
-			}
+			m.logger.Error("spawn pane failed", "err", err, "cmd", v.Command)
 			return m, nil
 		}
 		m.panes.Add(p)
 		m.activeKind = activePane
 		m.saveState()
-		if m.logger != nil {
-			m.logger.Info("pane spawned", "id", p.ID, "name", p.Title, "cmd", p.Command)
-		}
+		m.logger.Info("pane spawned", "id", p.ID, "name", p.Title, "cmd", p.Command)
 		return m, readPaneCmd(p)
 	case ClosePaneMsg:
 		if m.panes != nil {
@@ -610,9 +617,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		if err != nil {
 			m.lastErr = err
-			if m.logger != nil {
-				m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
-			}
+			m.logger.Error("create session failed", "err", err, "cwd", v.Cwd)
 			return m, nil
 		}
 		m.manager.Add(s)
@@ -625,9 +630,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.overlay.CloseTop()
 		if cur := m.manager.Current(); cur != nil {
 			cur.Title = v.NewTitle
-			if m.logger != nil {
-				m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
-			}
+			m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
 		}
 		m.saveState()
 		return m, nil
@@ -715,7 +718,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if p := m.activePane(); p != nil {
 			if pk, ok := msg.(tea.KeyPressMsg); ok {
 				if b := terminal.KeyToBytes(pk); b != nil {
-					_ = p.Send(b)
+					if err := p.Send(b); err != nil {
+						m.logger.Debug("pane send failed", "err", err, "pane", p.ID)
+					}
 				}
 			}
 			return m, nil
@@ -1003,6 +1008,11 @@ func (m *Model) markdown(text string) string {
 		return wrap(text, w)
 	}
 	rendered := strings.TrimRight(out, "\n")
+	if len(m.mdCache) >= mdCacheMax {
+		// Cheap eviction: drop everything once the cache fills up. Re-renders
+		// will warm it again over the next few frames.
+		m.mdCache = map[string]string{}
+	}
 	m.mdCache[text] = rendered
 	return rendered
 }
@@ -1014,7 +1024,7 @@ func (m Model) Run(ctx context.Context) error {
 	)
 	go func() {
 		<-ctx.Done()
-		_ = time.AfterFunc(0, p.Quit)
+		p.Quit()
 	}()
 	finalModel, err := p.Run()
 	// Persist before tearing down sessions so we capture the final draft.
@@ -1074,9 +1084,9 @@ func (m Model) saveState() {
 		ActiveKind: kind,
 		ActiveIdx:  idx,
 	}
-	if err := state.Save(st); err != nil && m.logger != nil {
+	if err := state.Save(st); err != nil {
 		m.logger.Error("save state failed", "err", err)
-	} else if m.logger != nil {
+	} else {
 		m.logger.Info("state saved", "sessions", len(sessions), "panes", len(panes), "kind", kind, "idx", idx)
 	}
 }

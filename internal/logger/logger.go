@@ -15,16 +15,16 @@ import (
 func Setup(prefix string) (*log.Logger, io.Closer) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return discard(prefix), noopCloser{}
+		return Discard(prefix), noopCloser{}
 	}
 	dir := filepath.Join(home, ".sunnytui")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return discard(prefix), noopCloser{}
+		return Discard(prefix), noopCloser{}
 	}
 	f, err := os.OpenFile(filepath.Join(dir, "sunnytui.log"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return discard(prefix), noopCloser{}
+		return Discard(prefix), noopCloser{}
 	}
 	logger := log.NewWithOptions(f, log.Options{
 		ReportTimestamp: true,
@@ -44,7 +44,9 @@ func LogPath() string {
 	return filepath.Join(home, ".sunnytui", "sunnytui.log")
 }
 
-func discard(prefix string) *log.Logger {
+// Discard returns a no-op logger that writes to io.Discard. Use it as a
+// non-nil default so callers can drop the `if logger != nil` checks.
+func Discard(prefix string) *log.Logger {
 	return log.NewWithOptions(io.Discard, log.Options{Prefix: prefix})
 }
 

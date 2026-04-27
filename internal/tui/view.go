@@ -194,13 +194,7 @@ func (m Model) renderStatus() string {
 	// Left side: select-mode badge wins, then session-error fallback.
 	var left string
 	if m.selectMode {
-		// Loud reverse-video badge so it's impossible to miss.
-		badge := lipgloss.NewStyle().
-			Foreground(colText).
-			Background(colSecondary).
-			Bold(true).
-			Padding(0, 1).
-			Render("✂ SELECT MODE")
+		badge := m.styles.SelectModeBadge.Render("✂ SELECT MODE")
 		left = badge + m.styles.StatusDesc.Render(" ctrl+s to exit · drag with mouse · cmd+c copy")
 	} else if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
 		left = m.styles.ResultError.Render("error: " + cur.LastErr.Error())

@@ -3,7 +3,9 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,11 @@ import (
 
 	"github.com/noesrafa/sunnytui/internal/claude"
 )
+
+// ErrSessionBusy is returned by Send when a turn is already in flight. It is
+// an expected state, not a fault — callers should normally check State first
+// instead of relying on this.
+var ErrSessionBusy = errors.New("session busy")
 
 // gitBranch returns the current branch of the given directory, or "" if it's
 // not a git repo or git is unavailable. Uses --show-current which handles
@@ -107,10 +114,11 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 	}
 	id := newID()
 	logger := opts.Logger
-	if logger != nil {
-		logger = logger.With("session", id, "cwd", cwd)
-		logger.Info("session created", "model", opts.Model, "effort", opts.Effort)
+	if logger == nil {
+		logger = log.NewWithOptions(io.Discard, log.Options{})
 	}
+	logger = logger.With("session", id, "cwd", cwd)
+	logger.Info("session created", "model", opts.Model, "effort", opts.Effort)
 	title := opts.Title
 	if title == "" {
 		title = filepath.Base(cwd)
@@ -133,20 +141,17 @@ func (s *Session) Cancel() error {
 	if s.Stream == nil {
 		return nil
 	}
-	if s.logger != nil {
-		s.logger.Info("session cancel requested")
-	}
+	s.logger.Info("session cancel requested")
 	return s.Stream.Cancel()
 }
 
-// Send dispatches a user turn. Caller must check State == StateIdle.
+// Send dispatches a user turn. Caller must check State == StateIdle;
+// otherwise ErrSessionBusy is returned without side effects.
 func (s *Session) Send(text string) error {
 	if s.State == StateThinking {
-		return fmt.Errorf("session busy")
+		return ErrSessionBusy
 	}
-	if s.logger != nil {
-		s.logger.Debug("send", "len", len(text))
-	}
+	s.logger.Debug("send", "len", len(text))
 	s.Items = append(s.Items, UserItem{Text: text})
 	s.State = StateThinking
 	s.StartedAt = time.Now()
@@ -154,9 +159,7 @@ func (s *Session) Send(text string) error {
 	if err := s.Stream.Send(text); err != nil {
 		s.State = StateError
 		s.LastErr = err
-		if s.logger != nil {
-			s.logger.Error("send failed", "err", err)
-		}
+		s.logger.Error("send failed", "err", err)
 		return err
 	}
 	return nil
@@ -164,9 +167,7 @@ func (s *Session) Send(text string) error {
 
 // HandleEvent ingests one decoded claude event and updates transcript + state.
 func (s *Session) HandleEvent(ev claude.Event) {
-	if s.logger != nil {
-		s.logger.Debug("event", "type", ev.Type, "subtype", ev.Subtype)
-	}
+	s.logger.Debug("event", "type", ev.Type, "subtype", ev.Subtype)
 	switch ev.Type {
 	case "rate_limit_event":
 		if ev.RateLimitInfo != nil {
@@ -176,9 +177,7 @@ func (s *Session) HandleEvent(ev claude.Event) {
 		if ev.Subtype == "init" && s.RemoteID == "" {
 			s.RemoteID = ev.SessionID
 			s.Model = ev.Model
-			if s.logger != nil {
-				s.logger.Info("session init", "remote", ev.SessionID, "model", ev.Model)
-			}
+			s.logger.Info("session init", "remote", ev.SessionID, "model", ev.Model)
 		}
 	case "assistant":
 		if ev.Message == nil {
@@ -198,9 +197,7 @@ func (s *Session) HandleEvent(ev claude.Event) {
 			case "tool_use":
 				s.Items = append(s.Items, ToolUseItem{ID: b.ID, Name: b.Name, Input: b.Input})
 				s.turnHadOutput = true
-				if s.logger != nil {
-					s.logger.Info("tool_use", "name", b.Name, "id", b.ID)
-				}
+				s.logger.Info("tool_use", "name", b.Name, "id", b.ID)
 			}
 		}
 	case "user":
@@ -227,13 +224,11 @@ func (s *Session) HandleEvent(ev claude.Event) {
 		s.TotalCost += ev.TotalCostUSD
 		s.Turns++
 		s.State = StateIdle
-		if s.logger != nil {
-			s.logger.Info("turn complete",
-				"duration_ms", ev.DurationMs,
-				"cost_usd", ev.TotalCostUSD,
-				"is_error", ev.IsError,
-			)
-		}
+		s.logger.Info("turn complete",
+			"duration_ms", ev.DurationMs,
+			"cost_usd", ev.TotalCostUSD,
+			"is_error", ev.IsError,
+		)
 	}
 }
 
@@ -255,9 +250,7 @@ func (s *Session) linkToolResult(id string, content json.RawMessage, isError boo
 		tu.IsError = isError
 		tu.Result = extractToolResult(content)
 		s.Items[i] = tu
-		if s.logger != nil {
-			s.logger.Info("tool_result", "name", tu.Name, "id", id, "is_error", isError, "result_len", len(tu.Result))
-		}
+		s.logger.Info("tool_result", "name", tu.Name, "id", id, "is_error", isError, "result_len", len(tu.Result))
 		return true
 	}
 	return false
@@ -290,9 +283,7 @@ func (s *Session) Close() error {
 	if s.Stream == nil {
 		return nil
 	}
-	if s.logger != nil {
-		s.logger.Info("session closing")
-	}
+	s.logger.Info("session closing")
 	return s.Stream.Close()
 }
 

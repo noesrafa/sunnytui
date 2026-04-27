@@ -70,6 +70,10 @@ type Styles struct {
 	BtnSelected lipgloss.Style
 	BtnPlain    lipgloss.Style
 
+	// SelectModeBadge is the loud reverse-video pill in the status bar that
+	// tells the user mouse capture is off and the terminal handles selection.
+	SelectModeBadge lipgloss.Style
+
 	DialogBox     lipgloss.Style
 	DialogTitle   lipgloss.Style
 	DialogWarning lipgloss.Style
@@ -142,6 +146,12 @@ func DefaultStyles() Styles {
 		BtnPlain: lipgloss.NewStyle().
 			Foreground(colMuted).
 			Padding(0, 2),
+
+		SelectModeBadge: lipgloss.NewStyle().
+			Foreground(colText).
+			Background(colSecondary).
+			Bold(true).
+			Padding(0, 1),
 
 		DialogBox: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
