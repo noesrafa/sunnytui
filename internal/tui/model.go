@@ -907,6 +907,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
 	case key.Matches(msg, m.keymap.Settings):
 		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.styles)), true
+	case key.Matches(msg, m.keymap.Game):
+		return m, m.overlay.Open(NewMinigameDialog(m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
 		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)), true
 	case key.Matches(msg, m.keymap.Runs):
