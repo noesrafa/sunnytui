@@ -23,66 +23,21 @@ func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s), ""}
-	rows = append(rows,
-		s.HeaderTitle.Render("sessions"),
-		s.HeaderSep.Render(strings.Repeat("─", innerW)),
-	)
-	if len(mgr.Sessions) == 0 {
-		rows = append(rows, s.Hint.Render("(none)"))
+	rows = append(rows, renderSessionsSection(mgr, activePaneActive, innerW, s)...)
+	if section := renderTermsSection(paneMgr, activePaneActive, innerW, s); len(section) > 0 {
+		rows = append(rows, "")
+		rows = append(rows, section...)
 	}
-	for i, sess := range mgr.Sessions {
-		if i > 0 {
-			rows = append(rows, "")
-		}
-		rows = append(rows, renderSidebarRow(sess, !activePaneActive && i == mgr.Active, s)...)
+	if section := renderUsageSection(mgr, innerW, s); len(section) > 0 {
+		rows = append(rows, "")
+		rows = append(rows, section...)
 	}
-
-	// Terminal panes section, listed after sessions.
-	if paneMgr != nil && paneMgr.Len() > 0 {
-		rows = append(rows, "", s.HeaderTitle.Render("terminals"),
-			s.HeaderSep.Render(strings.Repeat("─", innerW)))
-		for i, p := range paneMgr.Panes {
-			rows = append(rows, renderPaneRow(p, activePaneActive && i == paneMgr.Active, s))
-		}
+	if section := renderRunsSection(runMgr, innerW, s); len(section) > 0 {
+		rows = append(rows, "")
+		rows = append(rows, section...)
 	}
-
-	// Usage widget — prefers the statusline snapshot (has %, populated when
-	// `sunnytui statusline` is registered with Claude Code) and falls back to
-	// the rate_limit_event from stream-json (only has status + reset time).
-	if usageRows := buildUsageWidget(mgr, innerW, s); len(usageRows) > 0 {
-		rows = append(rows, "", s.HeaderTitle.Render("usage"),
-			s.HeaderSep.Render(strings.Repeat("─", innerW)))
-		rows = append(rows, usageRows...)
-	}
-
-	// Runs widget — list of registered shell runs with a status badge.
-	// Only rendered if there are runs OR the manager exists (so the
-	// "press ctrl+u" hint is visible to discover the feature).
-	if runMgr != nil {
-		rows = append(rows, "", s.HeaderTitle.Render("runs"),
-			s.HeaderSep.Render(strings.Repeat("─", innerW)))
-		all := runMgr.All()
-		if len(all) == 0 {
-			rows = append(rows, s.Hint.Render("(none)"))
-		} else {
-			for _, r := range all {
-				rows = append(rows, renderRunSummary(r, innerW, s))
-			}
-		}
-	}
-
-	rows = append(rows, "", s.HeaderSep.Render(strings.Repeat("─", innerW)))
-	rows = append(rows,
-		s.StatusKey.Render("ctrl+n")+s.Hint.Render(" new chat"),
-		s.StatusKey.Render("ctrl+t")+s.Hint.Render(" new term"),
-		s.StatusKey.Render("ctrl+r")+s.Hint.Render(" rename"),
-		s.StatusKey.Render("ctrl+u")+s.Hint.Render(" runs"),
-		s.StatusKey.Render("ctrl+k")+s.Hint.Render(" switch"),
-		s.StatusKey.Render("ctrl+s")+s.Hint.Render(" select"),
-		s.StatusKey.Render("tab")+s.Hint.Render("    next"),
-		s.StatusKey.Render("ctrl+w")+s.Hint.Render(" close"),
-		s.StatusKey.Render("esc")+s.Hint.Render("    quit"),
-	)
+	rows = append(rows, "")
+	rows = append(rows, renderShortcutsSection(innerW, s)...)
 
 	body := strings.Join(rows, "\n")
 	return lipgloss.NewStyle().
@@ -90,6 +45,84 @@ func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal
 		Height(height).
 		Padding(0, 1).
 		Render(body)
+}
+
+// sectionHeader returns the bold title + the rule below it, the canonical
+// way every sidebar block starts.
+func sectionHeader(title string, innerW int, s Styles) []string {
+	return []string{
+		s.HeaderTitle.Render(title),
+		s.HeaderSep.Render(strings.Repeat("─", innerW)),
+	}
+}
+
+func renderSessionsSection(mgr *session.Manager, activePaneActive bool, innerW int, s Styles) []string {
+	rows := sectionHeader("sessions", innerW, s)
+	if len(mgr.Sessions) == 0 {
+		return append(rows, s.Hint.Render("(none)"))
+	}
+	for i, sess := range mgr.Sessions {
+		if i > 0 {
+			rows = append(rows, "")
+		}
+		rows = append(rows, renderSidebarRow(sess, !activePaneActive && i == mgr.Active, s)...)
+	}
+	return rows
+}
+
+func renderTermsSection(paneMgr *terminal.Manager, activePaneActive bool, innerW int, s Styles) []string {
+	if paneMgr == nil || paneMgr.Len() == 0 {
+		return nil
+	}
+	rows := sectionHeader("terminals", innerW, s)
+	for i, p := range paneMgr.Panes {
+		rows = append(rows, renderPaneRow(p, activePaneActive && i == paneMgr.Active, s))
+	}
+	return rows
+}
+
+// renderUsageSection prefers the statusline snapshot (has percentages,
+// populated when `sunnytui statusline` is registered with Claude Code) and
+// falls back to the rate_limit_event from stream-json (only has status +
+// reset time).
+func renderUsageSection(mgr *session.Manager, innerW int, s Styles) []string {
+	usageRows := buildUsageWidget(mgr, innerW, s)
+	if len(usageRows) == 0 {
+		return nil
+	}
+	return append(sectionHeader("usage", innerW, s), usageRows...)
+}
+
+// renderRunsSection always shows once a manager exists, so the "press ctrl+u"
+// hint surface is discoverable even with zero registered runs.
+func renderRunsSection(runMgr *runs.Manager, innerW int, s Styles) []string {
+	if runMgr == nil {
+		return nil
+	}
+	rows := sectionHeader("runs", innerW, s)
+	all := runMgr.All()
+	if len(all) == 0 {
+		return append(rows, s.Hint.Render("(none)"))
+	}
+	for _, r := range all {
+		rows = append(rows, renderRunSummary(r, innerW, s))
+	}
+	return rows
+}
+
+func renderShortcutsSection(innerW int, s Styles) []string {
+	return []string{
+		s.HeaderSep.Render(strings.Repeat("─", innerW)),
+		s.StatusKey.Render("ctrl+n") + s.Hint.Render(" new chat"),
+		s.StatusKey.Render("ctrl+t") + s.Hint.Render(" new term"),
+		s.StatusKey.Render("ctrl+r") + s.Hint.Render(" rename"),
+		s.StatusKey.Render("ctrl+u") + s.Hint.Render(" runs"),
+		s.StatusKey.Render("ctrl+k") + s.Hint.Render(" switch"),
+		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" select"),
+		s.StatusKey.Render("tab") + s.Hint.Render("    next"),
+		s.StatusKey.Render("ctrl+w") + s.Hint.Render(" close"),
+		s.StatusKey.Render("esc") + s.Hint.Render("    quit"),
+	}
 }
 
 func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
