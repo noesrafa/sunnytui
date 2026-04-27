@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/filepicker"
@@ -19,6 +20,7 @@ const (
 	focusPicker newSessionFocus = iota
 	focusModel
 	focusEffort
+	numNewSessionFocus
 )
 
 type NewSessionDialog struct {
@@ -55,18 +57,18 @@ func NewNewSessionDialog(defaultCwd, defaultModel, defaultEffort string, s Style
 		fp:        fp,
 		styles:    s,
 		focus:     focusPicker,
-		modelIdx:  indexOf(modelChoices, defaultModel),
-		effortIdx: indexOf(effortChoices, defaultEffort),
+		modelIdx:  max0(slices.Index(modelChoices, defaultModel)),
+		effortIdx: max0(slices.Index(effortChoices, defaultEffort)),
 	}
 }
 
-func indexOf(opts []string, v string) int {
-	for i, o := range opts {
-		if o == v {
-			return i
-		}
+// max0 returns n if positive, else 0. Used to clamp slices.Index's -1 for
+// "not found" to a sensible default focus.
+func max0(n int) int {
+	if n < 0 {
+		return 0
 	}
-	return 0
+	return n
 }
 
 func (d *NewSessionDialog) Init() tea.Cmd {
@@ -81,10 +83,10 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 		case "enter":
 			return d.confirm()
 		case "tab":
-			d.focus = (d.focus + 1) % 3
+			d.focus = (d.focus + 1) % numNewSessionFocus
 			return nil
 		case "shift+tab":
-			d.focus = (d.focus + 2) % 3
+			d.focus = (d.focus + numNewSessionFocus - 1) % numNewSessionFocus
 			return nil
 		}
 		if d.focus == focusModel {

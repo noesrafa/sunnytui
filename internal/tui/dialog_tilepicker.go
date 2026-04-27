@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -139,7 +140,7 @@ func (d *TilePickerDialog) View(width, height int) string {
 	}
 	if len(d.filtered) > max {
 		rows = append(rows, d.styles.Hint.Render(
-			"  …"+itoa(len(d.filtered)-max)+" more"))
+			"  …"+strconv.Itoa(len(d.filtered)-max)+" more"))
 	}
 
 	hints := strings.Join([]string{
@@ -151,25 +152,3 @@ func (d *TilePickerDialog) View(width, height int) string {
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(rows, "\n"))
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
-}

@@ -36,20 +36,6 @@ func (m *Manager) ByID(id string) *Session {
 	return nil
 }
 
-func (m *Manager) Next() {
-	if len(m.Sessions) == 0 {
-		return
-	}
-	m.Active = (m.Active + 1) % len(m.Sessions)
-}
-
-func (m *Manager) Prev() {
-	if len(m.Sessions) == 0 {
-		return
-	}
-	m.Active = (m.Active - 1 + len(m.Sessions)) % len(m.Sessions)
-}
-
 func (m *Manager) Close(id string) {
 	for i, s := range m.Sessions {
 		if s.ID == id {

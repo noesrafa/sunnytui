@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -182,8 +183,8 @@ func runChat(args []string) error {
 	for _, ss := range saved.Sessions {
 		s, sErr := session.New(ctx, ss.Cwd, session.Options{
 			Logger:                   lg,
-			Model:                    fallback(ss.Model, model),
-			Effort:                   fallback(ss.Effort, effort),
+			Model:                    cmp.Or(ss.Model, model),
+			Effort:                   cmp.Or(ss.Effort, effort),
 			DangerousSkipPermissions: true,
 			ResumeID:                 ss.RemoteID,
 			Title:                    ss.Title,
@@ -255,15 +256,6 @@ func runChat(args []string) error {
 		InitialActiveKind:        saved.ActiveKind,
 	})
 	return root.Run(ctx)
-}
-
-// fallback returns primary if non-empty, else def. Used to merge per-session
-// saved options with the global CLI defaults.
-func fallback(primary, def string) string {
-	if primary != "" {
-		return primary
-	}
-	return def
 }
 
 func runStreamTest(prompts []string) error {

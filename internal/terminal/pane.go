@@ -9,7 +9,6 @@ package terminal
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"sync"
@@ -209,7 +208,3 @@ func (p *Pane) Cursor() (x, y int, visible bool) {
 	c := p.term.Cursor()
 	return c.X, c.Y, p.term.CursorVisible()
 }
-
-// Compile-time sanity: io.ReadCloser-ish interface is not needed, just
-// confirm the pty type is *os.File.
-var _ io.Reader = (*os.File)(nil)

@@ -8,8 +8,6 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// quit dialog keeps no $ amounts; we strip cost from the body.
-
 type QuitDialog struct {
 	styles      Styles
 	sessions    int

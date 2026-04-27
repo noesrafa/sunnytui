@@ -861,22 +861,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// switchSession saves current textarea as draft, runs the navigation func,
-// then restores the new current session's draft into the textarea.
-func (m *Model) switchSession(nav func()) {
-	if cur := m.manager.Current(); cur != nil {
-		cur.Draft = m.textarea.Value()
-	}
-	nav()
-	if next := m.manager.Current(); next != nil {
-		m.textarea.SetValue(next.Draft)
-		m.textarea.CursorEnd()
-	}
-	m.layout()
-	m.refreshViewport()
-	m.viewport.GotoBottom()
-}
-
 func (m Model) openQuitDialog() tea.Cmd {
 	anyThinking := false
 	for _, s := range m.manager.Sessions {

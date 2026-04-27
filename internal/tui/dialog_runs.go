@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -166,6 +165,3 @@ func padRight(s string, w int) string {
 	}
 	return s + strings.Repeat(" ", w-len(s))
 }
-
-// shortDuration formats a duration compactly for run uptime ("3m", "1h 24m").
-func runShortDuration(d time.Duration) string { return shortDuration(d) }

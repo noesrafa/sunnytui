@@ -1,6 +1,8 @@
 package terminal
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -23,7 +25,7 @@ func KeyToBytes(msg tea.KeyPressMsg) []byte {
 
 	// Alt+key — prefix ESC then encode as the bare key.
 	if mod := msg.Mod; mod&tea.ModAlt != 0 {
-		stripped := stripModPrefix(s, "alt+")
+		stripped := strings.TrimPrefix(s, "alt+")
 		if seq, ok := simpleKeys[stripped]; ok {
 			return append([]byte{0x1B}, []byte(seq)...)
 		}
@@ -118,13 +120,6 @@ func ctrlByte(s string) byte {
 	return 0
 }
 
-func stripModPrefix(s, prefix string) string {
-	if len(s) >= len(prefix) && s[:len(prefix)] == prefix {
-		return s[len(prefix):]
-	}
-	return s
-}
-
 // isControlString returns true if s looks like a recognized control name
 // (starts with a modifier prefix or is a known named key). We use it to skip
 // the "msg.Text passthrough" for control combos.
@@ -133,7 +128,7 @@ func isControlString(s string) bool {
 		return true
 	}
 	for _, p := range []string{"ctrl+", "alt+", "shift+"} {
-		if len(s) >= len(p) && s[:len(p)] == p {
+		if strings.HasPrefix(s, p) {
 			return true
 		}
 	}
