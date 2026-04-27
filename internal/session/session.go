@@ -86,6 +86,9 @@ type Options struct {
 	Model                    string
 	Effort                   string
 	DangerousSkipPermissions bool
+	ResumeID                 string // claude session_id to --resume on startup
+	Title                    string // override default basename(cwd) title (used by state restore)
+	Draft                    string // pre-populate the textarea draft (state restore)
 }
 
 func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
@@ -97,6 +100,7 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 		Model:                    opts.Model,
 		Effort:                   opts.Effort,
 		DangerousSkipPermissions: opts.DangerousSkipPermissions,
+		SessionID:                opts.ResumeID,
 	})
 	if err != nil {
 		return nil, err
@@ -107,14 +111,20 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 		logger = logger.With("session", id, "cwd", cwd)
 		logger.Info("session created", "model", opts.Model, "effort", opts.Effort)
 	}
+	title := opts.Title
+	if title == "" {
+		title = filepath.Base(cwd)
+	}
 	return &Session{
-		ID:     id,
-		Cwd:    cwd,
-		Title:  filepath.Base(cwd),
-		Branch: gitBranch(cwd),
-		Stream: stream,
-		State:  StateIdle,
-		logger: logger,
+		ID:       id,
+		Cwd:      cwd,
+		Title:    title,
+		Branch:   gitBranch(cwd),
+		RemoteID: opts.ResumeID, // optimistic; will be confirmed when init event arrives
+		Draft:    opts.Draft,
+		Stream:   stream,
+		State:    StateIdle,
+		logger:   logger,
 	}, nil
 }
 

@@ -69,3 +69,19 @@ type RenameSessionMsg struct {
 
 // ConfirmQuitMsg signals the root model to terminate the program.
 type ConfirmQuitMsg struct{}
+
+// Run management messages — emitted by run dialogs and consumed at the root.
+type OpenRunEditMsg struct{}
+type OpenRunLogsMsg struct{ ID string }
+type CreateRunMsg struct{ Name, Command, Cwd string }
+type DeleteRunMsg struct{ ID string }
+
+// Terminal-pane messages — flow from the new-pane dialog to the root model.
+type CreatePaneMsg struct{ Name, Command, Cwd string }
+type ClosePaneMsg struct{ ID string }
+
+// SwitchTabMsg is emitted by the tile picker; root jumps to the chosen tab.
+type SwitchTabMsg struct {
+	Kind  string // "claude" | "pane"
+	Index int
+}

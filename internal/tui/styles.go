@@ -1,25 +1,33 @@
 package tui
 
-import "charm.land/lipgloss/v2"
+import (
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
 
 // Fixed dark-theme palette. We avoid lipgloss.AdaptiveColor on purpose because
 // adaptive colors trigger an OSC 11 query at runtime to detect the terminal
 // background; that query's response was leaking back into the textarea on
 // terminals that don't immediately drain it. Hardcoded colors remove the
 // trigger entirely.
+// Charmtone palette — same colors Crush uses (verified against
+// /tmp/charm-x/exp/charmtone/charmtone.go). We adopt them outright so the
+// editor cursor + prompt feel pixel-identical.
 var (
-	colPrimary   = lipgloss.Color("#FF79C6") // pink
-	colSecondary = lipgloss.Color("#8BE9FD") // cyan
-	colAccent    = lipgloss.Color("#BD93F9") // purple
-	colSuccess   = lipgloss.Color("#50FA7B") // green
+	colPrimary   = lipgloss.Color("#6B50FF") // Charple — primary purple
+	colSecondary = lipgloss.Color("#FF60FF") // Dolly   — bright magenta (cursor)
+	colTertiary  = lipgloss.Color("#68FFD6") // Bok     — mint (focused prompt)
+	colAccent    = lipgloss.Color("#BD93F9") // legacy soft purple (kept for tool blocks)
+	colSuccess   = lipgloss.Color("#68FFD6") // mint (status idle reuses Bok)
 	colWarning   = lipgloss.Color("#FFB86C") // orange
 	colDanger    = lipgloss.Color("#FF5555") // red
-	colMuted     = lipgloss.Color("#6272A4") // grey-blue
-	colText      = lipgloss.Color("#F8F8F2") // off-white
+	colMuted     = lipgloss.Color("#858392") // Squid — grey
+	colText      = lipgloss.Color("#DFDBDD") // Ash   — off-white
 	colBorder    = lipgloss.Color("#44475A") // dark grey
-	colLogoTop   = lipgloss.Color("#FF79C6") // pink (top of letters + top hatch)
-	colLogoBot   = lipgloss.Color("#BD93F9") // purple (bottom of letters + bottom hatch)
-	colLogoVer   = lipgloss.Color("#8BE9FD") // cyan (version label)
+	colLogoTop   = lipgloss.Color("#FF60FF") // Dolly  (top of letters + top hatch)
+	colLogoBot   = lipgloss.Color("#6B50FF") // Charple (bottom of letters + bottom hatch)
+	colLogoVer   = lipgloss.Color("#68FFD6") // Bok cyan-ish for version label
 )
 
 type Styles struct {
@@ -65,6 +73,21 @@ type Styles struct {
 	DialogBox     lipgloss.Style
 	DialogTitle   lipgloss.Style
 	DialogWarning lipgloss.Style
+
+	EditorTextarea textarea.Styles
+
+	// Crush-style chat row prefixes (left border + padding).
+	// User msg = thick block ▌ (focused) or thin │ (blurred), Charple color.
+	// Assistant msg = padding-left 2, no border.
+	UserMsgFocused      lipgloss.Style
+	UserMsgBlurred      lipgloss.Style
+	AssistantMsgBlurred lipgloss.Style
+	AssistantMsgFocused lipgloss.Style
+
+	// Attribution row: ◇ <model> · <duration>
+	AttribIcon     lipgloss.Style
+	AttribModel    lipgloss.Style
+	AttribDuration lipgloss.Style
 }
 
 func DefaultStyles() Styles {
@@ -126,5 +149,67 @@ func DefaultStyles() Styles {
 			Padding(1, 2),
 		DialogTitle:   lipgloss.NewStyle().Foreground(colPrimary).Bold(true),
 		DialogWarning: lipgloss.NewStyle().Foreground(colWarning).Bold(true),
+
+		EditorTextarea: crushTextareaStyles(),
+
+		// User message: ▌/│ left-border in Charple, 1 col padding.
+		// Mirrors Crush's Messages.UserFocused/UserBlurred (quickstyle.go:797–803).
+		UserMsgFocused: lipgloss.NewStyle().
+			PaddingLeft(1).
+			BorderLeft(true).
+			BorderForeground(colPrimary).
+			BorderStyle(lipgloss.Border{Left: "▌"}),
+		UserMsgBlurred: lipgloss.NewStyle().
+			PaddingLeft(1).
+			BorderLeft(true).
+			BorderForeground(colPrimary).
+			BorderStyle(lipgloss.NormalBorder()),
+		// Assistant message: just padding-left so the text aligns with the
+		// space inside user borders. No border. (quickstyle.go:805)
+		AssistantMsgBlurred: lipgloss.NewStyle().PaddingLeft(2),
+		AssistantMsgFocused: lipgloss.NewStyle().
+			PaddingLeft(1).
+			BorderLeft(true).
+			BorderForeground(colTertiary). // mint
+			BorderStyle(lipgloss.Border{Left: "▌"}),
+
+		// Attribution row at the end of each assistant turn:
+		// "◇ Opus 4.7 · 7s"
+		AttribIcon:     lipgloss.NewStyle().Foreground(colMuted),
+		AttribModel:    lipgloss.NewStyle().Foreground(colMuted),
+		AttribDuration: lipgloss.NewStyle().Foreground(colMuted),
+	}
+}
+
+// crushTextareaStyles mirrors Crush's textarea.Styles config so the input
+// field feels identical: muted prompt when blurred, accent prompt when
+// focused, real block cursor that blinks. Source:
+// /tmp/charm-crush/internal/ui/styles/quickstyle.go (s.Editor.Textarea).
+func crushTextareaStyles() textarea.Styles {
+	base := lipgloss.NewStyle()
+	return textarea.Styles{
+		Focused: textarea.StyleState{
+			Base:             base,
+			Text:             base.Foreground(colText),
+			LineNumber:       base.Foreground(colMuted),
+			CursorLine:       base,
+			CursorLineNumber: base.Foreground(colMuted),
+			Placeholder:      base.Foreground(colMuted).Italic(true),
+			Prompt:           base.Foreground(colTertiary), // Bok mint, like Crush
+		},
+		Blurred: textarea.StyleState{
+			Base:             base,
+			Text:             base.Foreground(colMuted),
+			LineNumber:       base.Foreground(colMuted),
+			CursorLine:       base,
+			CursorLineNumber: base.Foreground(colMuted),
+			Placeholder:      base.Foreground(colMuted).Italic(true),
+			Prompt:           base.Foreground(colMuted),
+		},
+		Cursor: textarea.CursorStyle{
+			Color: colSecondary, // Dolly magenta — Crush's cursor exactly
+			Shape: tea.CursorBlock,
+			Blink: true,
+		},
 	}
 }

@@ -14,58 +14,85 @@ import (
 type RenderContext struct {
 	Width     int
 	Styles    Styles
-	LiveFrame string             // current spinner frame for live tools
+	LiveFrame string              // current spinner frame for live tools
 	Markdown  func(string) string // optional markdown renderer; nil → plain wrap
+	ModelName string              // active session's claude model id (for attribution row)
 }
 
 func RenderItem(it session.Item, ctx RenderContext) string {
 	s := ctx.Styles
 	switch v := it.(type) {
 	case session.UserItem:
-		prompt := s.UserPrompt.Render("›")
-		body := s.UserText.Render(wrap(v.Text, ctx.Width-2))
-		return lipgloss.JoinHorizontal(lipgloss.Top, prompt+" ", body)
+		// Crush pattern: vertical ▌/│ border in primary + 1 col padding.
+		body := wrap(v.Text, ctx.Width-3) // -3 = border + padding + safety
+		return s.UserMsgBlurred.Render(body)
 
 	case session.AssistantTextItem:
-		prompt := s.AssistantPrompt.Render("☀")
+		// Crush: padding-left 2, no prefix character, no border.
 		var body string
 		if ctx.Markdown != nil {
 			body = ctx.Markdown(v.Text)
 		} else {
-			body = s.AssistantText.Render(wrap(v.Text, ctx.Width-2))
+			body = wrap(v.Text, ctx.Width-3)
 		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, prompt+" ", body)
+		return s.AssistantMsgBlurred.Render(body)
 
 	case session.ThinkingItem:
-		prompt := s.AssistantThink.Render("·")
-		body := s.AssistantThink.Render(wrap(v.Text, ctx.Width-2))
-		return lipgloss.JoinHorizontal(lipgloss.Top, prompt+" ", body)
+		return s.AssistantMsgBlurred.Render(s.AssistantThink.Render(wrap(v.Text, ctx.Width-3)))
 
 	case session.ToolUseItem:
-		return renderToolUse(v, ctx)
+		return s.AssistantMsgBlurred.Render(renderToolUse(v, ctx))
 
 	case session.ToolResultItem:
-		prompt := s.ToolPrompt.Render("↳")
-		preview := truncateLines(v.Content, 6, ctx.Width-2)
-		return lipgloss.JoinHorizontal(lipgloss.Top, prompt+" ", s.ToolResult.Render(preview))
+		preview := truncateLines(v.Content, 6, ctx.Width-4)
+		return s.AssistantMsgBlurred.Render(s.ToolResult.Render("↳ " + preview))
 
 	case session.EmptyResponseItem:
-		prompt := s.AssistantPrompt.Render("☀")
-		body := s.Hint.Render("(sin respuesta)")
-		return lipgloss.JoinHorizontal(lipgloss.Top, prompt+" ", body)
+		return s.AssistantMsgBlurred.Render(s.Hint.Render("(sin respuesta)"))
 
 	case session.ErrorItem:
-		return s.ResultError.Render("✗ " + v.Message)
+		return s.AssistantMsgBlurred.Render(s.ResultError.Render("✗ " + v.Message))
 
 	case session.ResultItem:
-		icon := s.ResultOK.Render("✓")
+		// Crush attribution row: "◇ <model> · <duration>".
+		modelName := simplifyModelName(ctx.ModelName)
+		duration := fmt.Sprintf("%.1fs", float64(v.DurationMs)/1000.0)
+		icon := s.AttribIcon.Render("◇")
+		mdl := s.AttribModel.Render(modelName)
+		dur := s.AttribDuration.Render(duration)
+		errIcon := ""
 		if v.IsError {
-			icon = s.ResultError.Render("✗")
+			errIcon = s.ResultError.Render("✗ ") + " "
 		}
-		meta := fmt.Sprintf("%.2fs", float64(v.DurationMs)/1000.0)
-		return icon + " " + s.ResultMeta.Render(meta)
+		return errIcon + icon + " " + mdl + " · " + dur
 	}
 	return ""
+}
+
+// simplifyModelName strips Crush-style noise from claude model ids:
+// "claude-opus-4-7[1m]" → "Opus 4.7", "claude-sonnet-4-6" → "Sonnet 4.6".
+func simplifyModelName(s string) string {
+	if s == "" {
+		return "Claude"
+	}
+	if i := strings.Index(s, "["); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "claude-")
+	parts := strings.Split(s, "-")
+	if len(parts) == 0 {
+		return s
+	}
+	family := parts[0]
+	if len(family) > 0 {
+		family = strings.ToUpper(family[:1]) + family[1:]
+	}
+	if len(parts) == 1 {
+		return family
+	}
+	version := strings.Join(parts[1:], ".")
+	return family + " " + version
 }
 
 func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {

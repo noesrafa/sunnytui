@@ -12,6 +12,11 @@ func (m *Manager) Add(s *Session) {
 	m.Active = len(m.Sessions) - 1
 }
 
+// Len returns the number of registered sessions.
+func (m *Manager) Len() int {
+	return len(m.Sessions)
+}
+
 func (m *Manager) Current() *Session {
 	if len(m.Sessions) == 0 {
 		return nil

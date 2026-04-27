@@ -9,12 +9,21 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/noesrafa/sunnytui/internal/session"
+	"github.com/noesrafa/sunnytui/internal/terminal"
 )
 
 func (m Model) View() tea.View {
 	v := tea.NewView("starting…")
 	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	// When the user toggles select mode (ctrl+s), drop mouse capture so the
+	// host terminal can do its native click-and-drag text selection. Wheel
+	// scroll inside the chat stops working in this state — but you can still
+	// scroll with pgup/pgdn. Toggle off (ctrl+s again) to restore wheel.
+	if m.selectMode {
+		v.MouseMode = tea.MouseModeNone
+	} else {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
 	if !m.ready {
 		return v
 	}
@@ -23,9 +32,30 @@ func (m Model) View() tea.View {
 		v.SetContent(m.composeWithModal(base))
 	} else {
 		v.SetContent(base)
+		// In claude-session mode the textarea owns its own (virtual) cursor.
+		// In pane mode we project the embedded child's caret to absolute
+		// screen coordinates so the user sees a real terminal cursor.
+		if p := m.activePane(); p != nil {
+			cx, cy, vis := p.Cursor()
+			if vis {
+				// renderBase JoinVerticals (header, body, status). header is
+				// "" but `strings.Split("", "\n")` yields [""] — that
+				// becomes one blank row before the body. Account for it
+				// here so the caret lands on the same row as the cell
+				// the child terminal is rendering.
+				v.Cursor = tea.NewCursor(
+					sidebarWidth+sidebarGap+cx,
+					headerHeight+cy,
+				)
+				v.Cursor.Color = colSecondary
+				v.Cursor.Shape = tea.CursorBlock
+				v.Cursor.Blink = true
+			}
+		}
 	}
 	return v
 }
+
 
 // renderBase produces the full-screen UI without any modal on top.
 func (m Model) renderBase() string {
@@ -97,20 +127,29 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, bodyH, m.styles)
-	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles)
+	// 3-col gap between sidebar and main — Crush-style breathing room, no
+	// vertical divider line.
+	gap := lipgloss.NewStyle().Width(sidebarGap).Height(bodyH).Render("")
+	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, gap, main)
 }
 
 func (m Model) renderMain(height int) string {
+	mainW := m.width - sidebarWidth - sidebarGap
+	if mainW < 20 {
+		mainW = 20
+	}
+
+	// Pane mode: full main column is the vt10x grid.
+	if p := m.activePane(); p != nil {
+		return lipgloss.NewStyle().Width(mainW).Height(height).Render(terminal.Render(p))
+	}
+
+	// Claude session mode: transcript + input + hint.
 	cur := m.manager.Current()
 	transcript := m.viewport.View()
 	input := m.renderInput(cur)
 	hint := m.renderInputHint()
-
-	mainW := m.width - sidebarWidth - 1
-	if mainW < 20 {
-		mainW = 20
-	}
 	body := lipgloss.JoinVertical(lipgloss.Left, transcript, input, hint)
 	return lipgloss.NewStyle().Width(mainW).Height(height).Render(body)
 }
@@ -120,7 +159,7 @@ func (m Model) renderInput(cur *session.Session) string {
 	if cur != nil && cur.State == session.StateIdle {
 		style = m.styles.InputFocused
 	}
-	mainW := m.width - sidebarWidth - 1
+	mainW := m.width - sidebarWidth - sidebarGap
 	return style.Width(mainW).Render(m.textarea.View())
 }
 
@@ -152,9 +191,18 @@ func (m Model) renderStatus() string {
 	meta := fmt.Sprintf("%d sessions · %d turns", len(m.manager.Sessions), totalTurns)
 	right := m.styles.StatusDesc.Render(meta)
 
-	// Show error message on the left if the active session has one.
+	// Left side: select-mode badge wins, then session-error fallback.
 	var left string
-	if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
+	if m.selectMode {
+		// Loud reverse-video badge so it's impossible to miss.
+		badge := lipgloss.NewStyle().
+			Foreground(colText).
+			Background(colSecondary).
+			Bold(true).
+			Padding(0, 1).
+			Render("✂ SELECT MODE")
+		left = badge + m.styles.StatusDesc.Render(" ctrl+s to exit · drag with mouse · cmd+c copy")
+	} else if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
 		left = m.styles.ResultError.Render("error: " + cur.LastErr.Error())
 	}
 

@@ -8,12 +8,18 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/noesrafa/sunnytui/internal/claude"
+	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
+	"github.com/noesrafa/sunnytui/internal/terminal"
+	"github.com/noesrafa/sunnytui/internal/usage"
 )
 
-const sidebarWidth = 30
+const (
+	sidebarWidth = 30
+	sidebarGap   = 3 // empty cols between sidebar and main column
+)
 
-func renderSidebar(mgr *session.Manager, height int, s Styles) string {
+func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s), ""}
@@ -28,21 +34,51 @@ func renderSidebar(mgr *session.Manager, height int, s Styles) string {
 		if i > 0 {
 			rows = append(rows, "")
 		}
-		rows = append(rows, renderSidebarRow(sess, i == mgr.Active, s)...)
+		rows = append(rows, renderSidebarRow(sess, !activePaneActive && i == mgr.Active, s)...)
 	}
 
-	// Usage widget — derived from the rate_limit_event stream-json events
-	// (Claude Code emits one per turn). Shows up below the sessions list.
-	if cur := mgr.Current(); cur != nil && cur.RateLimit != nil {
+	// Terminal panes section, listed after sessions.
+	if paneMgr != nil && paneMgr.Len() > 0 {
+		rows = append(rows, "", s.HeaderTitle.Render("terminals"),
+			s.HeaderSep.Render(strings.Repeat("─", innerW)))
+		for i, p := range paneMgr.Panes {
+			rows = append(rows, renderPaneRow(p, activePaneActive && i == paneMgr.Active, s))
+		}
+	}
+
+	// Usage widget — prefers the statusline snapshot (has %, populated when
+	// `sunnytui statusline` is registered with Claude Code) and falls back to
+	// the rate_limit_event from stream-json (only has status + reset time).
+	if usageRows := buildUsageWidget(mgr, innerW, s); len(usageRows) > 0 {
 		rows = append(rows, "", s.HeaderTitle.Render("usage"),
 			s.HeaderSep.Render(strings.Repeat("─", innerW)))
-		rows = append(rows, renderUsage(cur.RateLimit, s)...)
+		rows = append(rows, usageRows...)
+	}
+
+	// Runs widget — list of registered shell runs with a status badge.
+	// Only rendered if there are runs OR the manager exists (so the
+	// "press ctrl+u" hint is visible to discover the feature).
+	if runMgr != nil {
+		rows = append(rows, "", s.HeaderTitle.Render("runs"),
+			s.HeaderSep.Render(strings.Repeat("─", innerW)))
+		all := runMgr.All()
+		if len(all) == 0 {
+			rows = append(rows, s.Hint.Render("(none)"))
+		} else {
+			for _, r := range all {
+				rows = append(rows, renderRunSummary(r, innerW, s))
+			}
+		}
 	}
 
 	rows = append(rows, "", s.HeaderSep.Render(strings.Repeat("─", innerW)))
 	rows = append(rows,
-		s.StatusKey.Render("ctrl+n")+s.Hint.Render(" new"),
+		s.StatusKey.Render("ctrl+n")+s.Hint.Render(" new chat"),
+		s.StatusKey.Render("ctrl+t")+s.Hint.Render(" new term"),
 		s.StatusKey.Render("ctrl+r")+s.Hint.Render(" rename"),
+		s.StatusKey.Render("ctrl+u")+s.Hint.Render(" runs"),
+		s.StatusKey.Render("ctrl+k")+s.Hint.Render(" switch"),
+		s.StatusKey.Render("ctrl+s")+s.Hint.Render(" select"),
 		s.StatusKey.Render("tab")+s.Hint.Render("    next"),
 		s.StatusKey.Render("ctrl+w")+s.Hint.Render(" close"),
 		s.StatusKey.Render("esc")+s.Hint.Render("    quit"),
@@ -53,9 +89,6 @@ func renderSidebar(mgr *session.Manager, height int, s Styles) string {
 		Width(sidebarWidth).
 		Height(height).
 		Padding(0, 1).
-		BorderRight(true).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(colBorder).
 		Render(body)
 }
 
@@ -101,6 +134,71 @@ func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
 		}
 	}
 	return []string{line1, line2}
+}
+
+// buildUsageWidget tries the rich percentage view first (statusline snapshot)
+// and falls back to a status-only line from the in-stream rate_limit_event.
+func buildUsageWidget(mgr *session.Manager, innerW int, s Styles) []string {
+	if payload, _, err := usage.Read(10 * time.Minute); err == nil && payload != nil && payload.RateLimits != nil {
+		var rows []string
+		if w := payload.RateLimits.FiveHour; w != nil {
+			rows = append(rows, renderUsageBar("5h", w, innerW, s)...)
+		}
+		if w := payload.RateLimits.SevenDay; w != nil {
+			if len(rows) > 0 {
+				rows = append(rows, "")
+			}
+			rows = append(rows, renderUsageBar("7d", w, innerW, s)...)
+		}
+		if len(rows) > 0 {
+			return rows
+		}
+	}
+	if cur := mgr.Current(); cur != nil && cur.RateLimit != nil {
+		return renderUsage(cur.RateLimit, s)
+	}
+	return nil
+}
+
+// renderUsageBar paints a claude-hud-style row:
+//
+//	5h ███░░░░░ 25%
+//	   resets in 1h 30m
+func renderUsageBar(label string, w *usage.Window, innerW int, s Styles) []string {
+	pct := w.UsedPercentage
+	barW := innerW - len(label) - 6 // " " + bar + " NN%"
+	if barW < 6 {
+		barW = 6
+	}
+	filled := pct * barW / 100
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > barW {
+		filled = barW
+	}
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
+
+	barStyle := s.StatusIdle
+	switch {
+	case pct >= 90:
+		barStyle = s.ResultError
+	case pct >= 70:
+		barStyle = s.StatusBusy
+	}
+	header := s.HeaderDim.Render(label) + " " + barStyle.Render(bar) + " " +
+		barStyle.Render(fmt.Sprintf("%d%%", pct))
+
+	rows := []string{header}
+	if w.ResetsAt > 0 {
+		d := time.Until(time.Unix(w.ResetsAt, 0))
+		if d < 0 {
+			rows = append(rows, "   "+s.Hint.Render("resetting…"))
+		} else {
+			rows = append(rows, "   "+s.Hint.Render("resets in "+shortDuration(d)))
+		}
+	}
+	return rows
 }
 
 func renderUsage(rl *claude.RateLimitInfo, s Styles) []string {
@@ -152,6 +250,48 @@ func shortDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%ds", int(d.Seconds()))
+}
+
+func renderPaneRow(p *terminal.Pane, active bool, s Styles) string {
+	var icon string
+	if p.Alive() {
+		icon = s.StatusIdle.Render("▶")
+	} else {
+		icon = s.Hint.Render("□")
+	}
+	indicator := " "
+	titleStyle := s.AssistantText
+	if active {
+		indicator = s.UserPrompt.Render("▎")
+		titleStyle = s.AssistantText.Bold(true)
+	}
+	name := p.Title
+	maxLen := sidebarWidth - 8
+	if len(name) > maxLen && maxLen > 0 {
+		name = name[:maxLen-1] + "…"
+	}
+	return indicator + icon + " " + titleStyle.Render(name)
+}
+
+func renderRunSummary(r *runs.Run, innerW int, s Styles) string {
+	var icon string
+	switch r.Status {
+	case runs.StatusRunning:
+		icon = s.StatusIdle.Render("●")
+	case runs.StatusCrashed:
+		icon = s.ResultError.Render("✗")
+	default:
+		icon = s.Hint.Render("○")
+	}
+	name := r.Name
+	maxName := innerW - 6
+	if maxName < 4 {
+		maxName = 4
+	}
+	if len(name) > maxName {
+		name = name[:maxName-1] + "…"
+	}
+	return " " + icon + " " + s.AssistantText.Render(name)
 }
 
 func stateBadge(st session.State, s Styles) string {

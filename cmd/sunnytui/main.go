@@ -4,25 +4,41 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 
 	"github.com/noesrafa/sunnytui/internal/claude"
 	"github.com/noesrafa/sunnytui/internal/logger"
+	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
+	"github.com/noesrafa/sunnytui/internal/state"
+	"github.com/noesrafa/sunnytui/internal/terminal"
 	"github.com/noesrafa/sunnytui/internal/tui"
+	"github.com/noesrafa/sunnytui/internal/usage"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		printUsage()
 		os.Exit(2)
 	}
 	switch os.Args[1] {
 	case "chat":
 		if err := runChat(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "statusline":
+		if err := runStatusline(); err != nil {
+			fmt.Fprintln(os.Stderr, "statusline error:", err)
+			os.Exit(1)
+		}
+	case "statusline-install":
+		if err := installStatusline(); err != nil {
+			fmt.Fprintln(os.Stderr, "install error:", err)
 			os.Exit(1)
 		}
 	case "spike":
@@ -41,15 +57,15 @@ func main() {
 			os.Exit(1)
 		}
 	case "-h", "--help", "help":
-		usage()
+		printUsage()
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", os.Args[1])
-		usage()
+		printUsage()
 		os.Exit(2)
 	}
 }
 
-func usage() {
+func printUsage() {
 	fmt.Fprintln(os.Stderr, `sunnytui — multi-session Claude Code TUI
 
 Commands:
@@ -58,7 +74,66 @@ Commands:
                             effort: low|medium|high|xhigh|max.
   spike <prompt>            M1: run one Claude turn and pretty-print events
   stream-test <p1> <p2>...  M2 backend: send N prompts on one streaming session
+  statusline                act as Claude Code's statusline (reads stdin JSON,
+                            persists usage snapshot for the chat sidebar)
+  statusline-install        print instructions to register sunnytui as the
+                            Claude Code statusline command
   help                      show this message`)
+}
+
+// runStatusline is invoked by Claude Code as its configured statusLine.command.
+// Claude Code pipes a JSON payload to our stdin (model, context_window,
+// rate_limits, …) on each refresh; we persist it to disk so the chat sidebar
+// can read percentages later. Whatever we print to stdout becomes the line
+// Claude Code shows to the user.
+func runStatusline() error {
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	if len(raw) == 0 {
+		fmt.Println("☀ sunnytui")
+		return nil
+	}
+	if err := usage.Write(raw); err != nil {
+		fmt.Fprintln(os.Stderr, "warn: persist snapshot:", err)
+	}
+	// Print a compact one-line summary so Claude Code has a statusline to show.
+	if p, _, perr := usage.Read(0); perr == nil && p != nil && p.RateLimits != nil {
+		var parts []string
+		if w := p.RateLimits.FiveHour; w != nil {
+			parts = append(parts, fmt.Sprintf("5h %d%%", w.UsedPercentage))
+		}
+		if w := p.RateLimits.SevenDay; w != nil {
+			parts = append(parts, fmt.Sprintf("7d %d%%", w.UsedPercentage))
+		}
+		fmt.Println("☀ " + strings.Join(parts, " · "))
+	} else {
+		fmt.Println("☀ sunnytui")
+	}
+	return nil
+}
+
+func installStatusline() error {
+	exe, err := exec.LookPath("sunnytui")
+	if err != nil {
+		exe, _ = os.Executable()
+	}
+	fmt.Printf(`Add this to ~/.claude/settings.json (creating "statusLine" if needed):
+
+  "statusLine": {
+    "type": "command",
+    "command": "%s statusline"
+  }
+
+Then run `+"`claude`"+` interactively (any project, any prompt) once. Claude Code
+will refresh its statusline and our subcommand will write the snapshot to:
+
+  %s
+
+After that, sunnytui chat's "usage" widget will show the percentages.
+`, exe, usage.SnapshotPath())
+	return nil
 }
 
 func runChat(args []string) error {
@@ -96,24 +171,99 @@ func runChat(args []string) error {
 	lg.Info("chat starting", "cwd", cwd, "model", model, "effort", effort, "log", logger.LogPath())
 
 	mgr := session.NewManager()
-	first, err := session.New(ctx, cwd, session.Options{
-		Logger:                   lg,
-		Model:                    model,
-		Effort:                   effort,
-		DangerousSkipPermissions: true,
-	})
-	if err != nil {
-		return fmt.Errorf("start initial session: %w", err)
+	paneMgr := terminal.NewManager()
+
+	// Single source of truth for between-runs state. v2: includes panes too.
+	saved, _ := state.Load()
+	if saved == nil {
+		saved = &state.State{ActiveKind: "claude"}
 	}
-	mgr.Add(first)
+
+	for _, ss := range saved.Sessions {
+		s, sErr := session.New(ctx, ss.Cwd, session.Options{
+			Logger:                   lg,
+			Model:                    fallback(ss.Model, model),
+			Effort:                   fallback(ss.Effort, effort),
+			DangerousSkipPermissions: true,
+			ResumeID:                 ss.RemoteID,
+			Title:                    ss.Title,
+			Draft:                    ss.Draft,
+		})
+		if sErr != nil {
+			lg.Warn("restore session failed", "cwd", ss.Cwd, "err", sErr)
+			continue
+		}
+		mgr.Add(s)
+	}
+	if mgr.Len() == 0 {
+		// Fresh install or all sessions failed to restore — open one default.
+		first, err := session.New(ctx, cwd, session.Options{
+			Logger:                   lg,
+			Model:                    model,
+			Effort:                   effort,
+			DangerousSkipPermissions: true,
+		})
+		if err != nil {
+			return fmt.Errorf("start initial session: %w", err)
+		}
+		mgr.Add(first)
+	}
+
+	for _, sp := range saved.Panes {
+		p, err := terminal.Spawn(sp.Title, sp.Command, sp.Cwd, 80, 24)
+		if err != nil {
+			lg.Warn("respawn pane failed", "name", sp.Title, "cmd", sp.Command, "err", err)
+			continue
+		}
+		paneMgr.Add(p)
+	}
+	defer paneMgr.CloseAll()
+
+	// Apply the saved active-tab pointer.
+	switch saved.ActiveKind {
+	case "claude":
+		if saved.ActiveIdx >= 0 && saved.ActiveIdx < mgr.Len() {
+			mgr.Active = saved.ActiveIdx
+		}
+	case "pane":
+		if saved.ActiveIdx >= 0 && saved.ActiveIdx < paneMgr.Len() {
+			paneMgr.Active = saved.ActiveIdx
+		}
+	}
+
+	runMgr, err := runs.Load()
+	if err != nil {
+		lg.Warn("runs.Load failed, starting empty", "err", err)
+		runMgr = &runs.Manager{}
+	}
+	defer runMgr.StopAll()
+
+	lg.Info("state restored",
+		"sessions", mgr.Len(),
+		"panes", paneMgr.Len(),
+		"active_kind", saved.ActiveKind,
+		"active_idx", saved.ActiveIdx,
+	)
 
 	root := tui.NewModel(ctx, mgr, cwd, tui.Options{
 		Logger:                   lg,
 		DefaultModel:             model,
 		DefaultEffort:            effort,
 		DangerousSkipPermissions: true,
+		Runs:                     runMgr,
+		Panes:                    paneMgr,
+		InitialActiveKind:        saved.ActiveKind,
 	})
 	return root.Run(ctx)
+}
+
+// fallback returns primary if non-empty, else def. Used to merge per-session
+// saved options with the global CLI defaults.
+func fallback(primary, def string) string {
+	if primary != "" {
+		return primary
+	}
+	return def
 }
 
 func runStreamTest(prompts []string) error {

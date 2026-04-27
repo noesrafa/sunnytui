@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"image"
 	"strings"
 	"time"
 
@@ -13,8 +14,22 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/log/v2"
+	"github.com/atotto/clipboard"
 
+	"github.com/noesrafa/sunnytui/internal/anim"
+	"github.com/noesrafa/sunnytui/internal/highlight"
+	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
+	"github.com/noesrafa/sunnytui/internal/state"
+	"github.com/noesrafa/sunnytui/internal/terminal"
+)
+
+// activeKind identifies which tab type is currently in focus.
+type activeKind int
+
+const (
+	activeClaude activeKind = iota
+	activePane
 )
 
 type Model struct {
@@ -28,6 +43,10 @@ type Model struct {
 	logger *log.Logger
 
 	manager       *session.Manager
+	runs          *runs.Manager
+	panes         *terminal.Manager
+	activeKind    activeKind
+	selectMode    bool // legacy escape hatch: drops mouse capture so terminal does native selection
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -36,6 +55,14 @@ type Model struct {
 	lastErr       error
 	lastCtrlC     time.Time
 
+	// App-level drag-to-select-and-copy (Crush-style). Coords are in
+	// rendered-transcript content space (X = column, Y = line within the
+	// full SetContent string, NOT the on-screen row).
+	mouseDown      bool
+	selStart       image.Point
+	selEnd         image.Point
+	lastTranscript string // unhighlighted content used for clipboard extract
+
 	viewport viewport.Model
 	textarea textarea.Model
 	spinner  spinner.Model
@@ -43,6 +70,10 @@ type Model struct {
 	md      *glamour.TermRenderer
 	mdW     int
 	mdCache map[string]string
+
+	// Morphing-string spinner shown during assistant streaming. One global
+	// instance — the active session's "Thinking" label drives it.
+	thinkingAnim *anim.Anim
 }
 
 type Options struct {
@@ -50,6 +81,11 @@ type Options struct {
 	DefaultModel             string
 	DefaultEffort            string
 	DangerousSkipPermissions bool
+	Runs                     *runs.Manager
+	Panes                    *terminal.Manager
+	// InitialActiveKind ("claude" | "pane") restores which kind of tab was
+	// focused at the previous shutdown. Empty defaults to claude.
+	InitialActiveKind string
 }
 
 const (
@@ -64,13 +100,19 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	st := DefaultStyles()
 	km := DefaultKeyMap()
 
+	// Editor — patterned exactly off Crush's textarea init at
+	// /tmp/charm-crush/internal/ui/model/ui.go:271. Same init order, same
+	// style application, same dynamic height, same cursor block + blink.
 	ta := textarea.New()
-	ta.Placeholder = "escribe tu mensaje y enter para enviar (shift+enter o ctrl+j: nueva línea · \\+enter también)"
+	ta.SetStyles(st.EditorTextarea)
+	ta.Placeholder = "escribe tu mensaje y enter para enviar (ctrl+j newline · \\+enter también)"
 	ta.Prompt = "› "
 	ta.CharLimit = -1
 	ta.ShowLineNumbers = false
-	ta.SetVirtualCursor(false)
-	// Crush pattern: let bubbles handle dynamic height between min/max.
+	// Virtual cursor: renders inline as a styled cell inside the textarea
+	// View() output. Sidesteps the real-cursor offset math (Crush relies on
+	// ultraviolet's exact layout coords; we don't have that machinery yet).
+	ta.SetVirtualCursor(true)
 	ta.DynamicHeight = true
 	ta.MinHeight = textareaMinH
 	ta.MaxHeight = textareaMaxH
@@ -88,6 +130,13 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	vp.SetWidth(80)
 	vp.SetHeight(20)
 
+	thinking := anim.New(anim.Settings{
+		Size:       12,
+		GradFrom:   colSecondary, // Dolly magenta
+		GradTo:     colPrimary,   // Charple purple
+		LabelColor: colText,      // Ash off-white
+	})
+
 	defModel := opts.DefaultModel
 	if defModel == "" {
 		defModel = "opus"
@@ -97,16 +146,24 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		defEffort = "max"
 	}
 
+	startKind := activeClaude
+	if opts.InitialActiveKind == "pane" && opts.Panes != nil && opts.Panes.Len() > 0 {
+		startKind = activePane
+	}
 	return Model{
 		ctx:           ctx,
 		styles:        st,
 		keymap:        km,
 		logger:        opts.Logger,
 		manager:       mgr,
+		runs:          opts.Runs,
+		panes:         opts.Panes,
+		activeKind:    startKind,
 		overlay:       &Overlay{},
 		viewport:      vp,
 		textarea:      ta,
 		spinner:       sp,
+		thinkingAnim:  thinking,
 		initialCwd:    initialCwd,
 		defaultModel:  defModel,
 		defaultEffort: defEffort,
@@ -121,6 +178,14 @@ func (m Model) Init() tea.Cmd {
 	}
 	for _, s := range m.manager.Sessions {
 		cmds = append(cmds, waitForSession(s))
+	}
+	// CRITICAL: restored panes (loaded from ~/.sunnytui/panes.json) need
+	// their PTY-read loop kicked off too — otherwise the buffer fills, the
+	// child process blocks on write, and the pane appears dead.
+	if m.panes != nil {
+		for _, p := range m.panes.Panes {
+			cmds = append(cmds, readPaneCmd(p))
+		}
 	}
 	return tea.Batch(cmds...)
 }
@@ -146,6 +211,273 @@ func (m Model) anyThinking() bool {
 	return false
 }
 
+// paneSize returns the (cols, rows) the active pane should occupy in the
+// main column when it is the visible tab.
+func (m Model) paneSize() (int, int) {
+	w := m.width - sidebarWidth - sidebarGap
+	if w < 20 {
+		w = 20
+	}
+	h := m.height - statusHeight
+	if h < 5 {
+		h = 5
+	}
+	return w, h
+}
+
+// readPaneCmd reads one chunk from the pane's PTY (which feeds vt10x
+// internally) and returns a paneOutputMsg so the Update loop re-renders.
+// On EOF / error, returns paneClosedMsg.
+func readPaneCmd(p *terminal.Pane) tea.Cmd {
+	id := p.ID
+	return func() tea.Msg {
+		buf := make([]byte, 4096)
+		_, err := p.ReadOnce(buf)
+		if err != nil {
+			return paneClosedMsg{PaneID: id, Err: err}
+		}
+		return paneOutputMsg{PaneID: id}
+	}
+}
+
+// collectTiles assembles the picker entries: every claude session, then
+// every terminal pane. Marks the currently-focused one.
+func (m Model) collectTiles() []TileItem {
+	var items []TileItem
+	for i, s := range m.manager.Sessions {
+		items = append(items, TileItem{
+			Kind:   "claude",
+			Index:  i,
+			Label:  s.Title,
+			Detail: s.Cwd,
+			Active: m.activeKind == activeClaude && i == m.manager.Active,
+		})
+	}
+	if m.panes != nil {
+		for i, p := range m.panes.Panes {
+			items = append(items, TileItem{
+				Kind:   "pane",
+				Index:  i,
+				Label:  p.Title,
+				Detail: p.Command,
+				Active: m.activeKind == activePane && i == m.panes.Active,
+			})
+		}
+	}
+	return items
+}
+
+// activePane returns the currently focused pane, or nil if no pane tab is
+// active.
+func (m Model) activePane() *terminal.Pane {
+	if m.activeKind != activePane || m.panes == nil {
+		return nil
+	}
+	return m.panes.Current()
+}
+
+// cycleTab moves the focus to the next/prev tab in the unified flat list of
+// (claude sessions + panes). Wraps. Resizes the destination pane on entry.
+func (m *Model) cycleTab(by int) {
+	clCount := m.manager.Len()
+	pnCount := 0
+	if m.panes != nil {
+		pnCount = m.panes.Len()
+	}
+	total := clCount + pnCount
+	if total == 0 {
+		return
+	}
+	cur := m.flatTabIndex()
+	next := ((cur+by)%total + total) % total
+	m.setFlatTabIndex(next)
+	// On switching to a pane, ensure it matches current main dims and the
+	// child got SIGWINCH if anything changed.
+	if p := m.activePane(); p != nil {
+		w, h := m.paneSize()
+		p.Resize(w, h)
+	}
+	// On switching to a claude session, restore its draft.
+	if m.activeKind == activeClaude {
+		if cur := m.manager.Current(); cur != nil {
+			m.textarea.SetValue(cur.Draft)
+			m.textarea.CursorEnd()
+			m.layout()
+			m.refreshViewport()
+			m.viewport.GotoBottom()
+		}
+	}
+}
+
+func (m Model) flatTabIndex() int {
+	if m.activeKind == activeClaude {
+		return m.manager.Active
+	}
+	if m.panes == nil {
+		return 0
+	}
+	return m.manager.Len() + m.panes.Active
+}
+
+func (m *Model) setFlatTabIndex(i int) {
+	clCount := m.manager.Len()
+	if i < clCount {
+		// Save current draft before moving away from a claude session.
+		if m.activeKind == activeClaude {
+			if cur := m.manager.Current(); cur != nil {
+				cur.Draft = m.textarea.Value()
+			}
+		}
+		m.activeKind = activeClaude
+		m.manager.Active = i
+		return
+	}
+	if m.panes == nil {
+		return
+	}
+	if m.activeKind == activeClaude {
+		if cur := m.manager.Current(); cur != nil {
+			cur.Draft = m.textarea.Value()
+		}
+	}
+	m.activeKind = activePane
+	m.panes.SetActive(i - clCount)
+}
+
+// inChatRegion reports whether (x, y) — in screen coords — falls inside the
+// transcript viewport: right of the sidebar, below the header, above the
+// input box. Pane mode and overlays are excluded by callers.
+func (m Model) inChatRegion(x, y int) bool {
+	if x < sidebarWidth+sidebarGap || x >= m.width {
+		return false
+	}
+	if y < headerHeight {
+		return false
+	}
+	if y >= headerHeight+m.viewport.Height() {
+		return false
+	}
+	return true
+}
+
+// screenToContent maps screen coordinates into transcript content
+// coordinates (X = column inside the rendered string, Y = line inside the
+// full SetContent string accounting for viewport scroll). Coords are
+// clamped to the chat content rectangle so callers can use the result
+// even when the user drags beyond the viewport.
+func (m Model) screenToContent(x, y int) (cx, cy int) {
+	cx = x - sidebarWidth - sidebarGap
+	if cx < 0 {
+		cx = 0
+	}
+	if w := m.viewport.Width(); w > 0 && cx >= w {
+		cx = w - 1
+	}
+	cy = (y - headerHeight) + m.viewport.YOffset()
+	if cy < 0 {
+		cy = 0
+	}
+	return
+}
+
+func (m Model) hasSelection() bool {
+	return m.selStart != m.selEnd
+}
+
+func (m *Model) clearSelection() {
+	m.mouseDown = false
+	m.selStart = image.Point{}
+	m.selEnd = image.Point{}
+}
+
+// selectionRange returns the selection coords normalized so (sl, sc) precedes
+// (el, ec) in reading order. Mirrors Crush's getHighlightRange.
+func (m Model) selectionRange() (sl, sc, el, ec int) {
+	a, b := m.selStart, m.selEnd
+	if a.Y > b.Y || (a.Y == b.Y && a.X > b.X) {
+		a, b = b, a
+	}
+	return a.Y, a.X, b.Y, b.X
+}
+
+// handleMouse implements drag-to-select-and-copy on the transcript. Mouse
+// down starts a selection at the cursor; motion extends it; release copies
+// the selected text to the clipboard (or clears the empty selection if it
+// was just a click).
+func (m Model) handleMouse(mm tea.MouseMsg) tea.Model {
+	e := mm.Mouse()
+	cx, cy := m.screenToContent(e.X, e.Y)
+	switch ev := mm.(type) {
+	case tea.MouseClickMsg:
+		if ev.Button != tea.MouseLeft {
+			return m
+		}
+		if !m.inChatRegion(e.X, e.Y) {
+			m.clearSelection()
+			m.refreshViewport()
+			return m
+		}
+		m.mouseDown = true
+		m.selStart = image.Pt(cx, cy)
+		m.selEnd = image.Pt(cx, cy)
+		m.refreshViewport()
+	case tea.MouseMotionMsg:
+		if !m.mouseDown {
+			return m
+		}
+		m.selEnd = image.Pt(cx, cy)
+		m.refreshViewport()
+	case tea.MouseReleaseMsg:
+		if !m.mouseDown {
+			return m
+		}
+		m.mouseDown = false
+		m.selEnd = image.Pt(cx, cy)
+		if text := m.copySelection(); text == "" {
+			m.clearSelection()
+		}
+		m.refreshViewport()
+	}
+	return m
+}
+
+// copySelection extracts the selected text from the last rendered
+// transcript and writes it to the clipboard. Returns the extracted text
+// (or "" if the selection was empty).
+func (m Model) copySelection() string {
+	if !m.hasSelection() || m.lastTranscript == "" {
+		return ""
+	}
+	sl, sc, el, ec := m.selectionRange()
+	w := m.viewport.Width()
+	h := lipgloss.Height(m.lastTranscript)
+	text := highlight.Extract(m.lastTranscript, w, h, sl, sc, el, ec)
+	if text == "" {
+		return ""
+	}
+	if err := clipboard.WriteAll(text); err != nil && m.logger != nil {
+		m.logger.Warn("clipboard write failed", "err", err, "len", len(text))
+	} else if m.logger != nil {
+		m.logger.Info("clipboard write", "len", len(text))
+	}
+	return text
+}
+
+// anyRunRunning is true while at least one registered run has its child
+// process alive. Used to keep the spinner tick chain alive so the logs
+// viewer refreshes in real time.
+func (m Model) anyRunRunning() bool {
+	if m.runs == nil {
+		return false
+	}
+	for _, r := range m.runs.All() {
+		if r.Running() {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
@@ -156,6 +488,108 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case ConfirmQuitMsg:
 		return m, tea.Quit
+	case OpenRunEditMsg:
+		cwd := m.initialCwd
+		if cur := m.manager.Current(); cur != nil {
+			cwd = cur.Cwd
+		}
+		return m, m.overlay.Open(NewRunEditDialog(cwd, m.styles))
+	case OpenRunLogsMsg:
+		if m.runs != nil {
+			if r := m.runs.Get(v.ID); r != nil {
+				return m, m.overlay.Open(NewRunLogsDialog(r, m.styles))
+			}
+		}
+		return m, nil
+	case CreateRunMsg:
+		m.overlay.CloseTop()
+		if m.runs != nil {
+			r := m.runs.Add(v.Name, v.Command, v.Cwd)
+			_ = m.runs.Save()
+			if m.logger != nil {
+				m.logger.Info("run created", "id", r.ID, "name", r.Name)
+			}
+			// Reopen the runs list so the user can act on the new entry.
+			return m, m.overlay.Open(NewRunsDialog(m.runs, m.styles))
+		}
+		return m, nil
+	case DeleteRunMsg:
+		if m.runs != nil {
+			m.runs.Remove(v.ID)
+			_ = m.runs.Save()
+		}
+		return m, nil
+	case CreatePaneMsg:
+		m.overlay.CloseTop()
+		if m.panes == nil {
+			m.panes = terminal.NewManager()
+		}
+		mainW, mainH := m.paneSize()
+		p, err := terminal.Spawn(v.Name, v.Command, v.Cwd, mainW, mainH)
+		if err != nil {
+			m.lastErr = err
+			if m.logger != nil {
+				m.logger.Error("spawn pane failed", "err", err, "cmd", v.Command)
+			}
+			return m, nil
+		}
+		m.panes.Add(p)
+		m.activeKind = activePane
+		m.saveState()
+		if m.logger != nil {
+			m.logger.Info("pane spawned", "id", p.ID, "name", p.Title, "cmd", p.Command)
+		}
+		return m, readPaneCmd(p)
+	case ClosePaneMsg:
+		if m.panes != nil {
+			m.panes.Close(v.ID)
+			if m.panes.Len() == 0 {
+				m.activeKind = activeClaude
+			}
+			m.saveState()
+		}
+		return m, nil
+	case SwitchTabMsg:
+		m.overlay.CloseTop()
+		switch v.Kind {
+		case "claude":
+			m.activeKind = activeClaude
+			m.manager.Active = v.Index
+			if cur := m.manager.Current(); cur != nil {
+				m.textarea.SetValue(cur.Draft)
+				m.textarea.CursorEnd()
+				m.layout()
+				m.refreshViewport()
+				m.viewport.GotoBottom()
+			}
+		case "pane":
+			if m.panes != nil {
+				m.activeKind = activePane
+				m.panes.SetActive(v.Index)
+				if p := m.activePane(); p != nil {
+					w, h := m.paneSize()
+					p.Resize(w, h)
+				}
+			}
+		}
+		return m, nil
+	case paneOutputMsg:
+		// vt10x already received the bytes inside ReadOnce; just re-arm the
+		// reader so the next chunk gets pumped.
+		if m.panes != nil {
+			if p := m.panes.ByID(v.PaneID); p != nil {
+				return m, readPaneCmd(p)
+			}
+		}
+		return m, nil
+	case paneClosedMsg:
+		if m.panes != nil {
+			m.panes.Close(v.PaneID)
+			if m.panes.Len() == 0 {
+				m.activeKind = activeClaude
+			}
+		}
+		return m, nil
 	case CreateSessionMsg:
 		m.overlay.CloseTop()
 		if v.Model != "" {
@@ -185,6 +619,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.Reset() // new session starts with empty draft
 		m.layout()
 		m.refreshViewport()
+		m.saveState()
 		return m, waitForSession(s)
 	case RenameSessionMsg:
 		m.overlay.CloseTop()
@@ -194,11 +629,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logger.Info("session renamed", "session", cur.ID, "title", v.NewTitle)
 			}
 		}
+		m.saveState()
 		return m, nil
 	}
 
-	// Only wheel events route to the viewport. Click/motion are dropped to
-	// avoid surprising selection behavior on top of the chat.
+	// Wheel events scroll the chat. Click/Motion/Release implement
+	// Crush-style drag-to-select-and-copy in the chat region (see
+	// internal/highlight + Crush's HandleMouseDown/Drag/Up).
 	if mm, isWheel := msg.(tea.MouseWheelMsg); isWheel {
 		if !m.overlay.HasOpen() {
 			m.viewport, cmd = m.viewport.Update(mm)
@@ -206,8 +643,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 	}
-	if _, isMouse := msg.(tea.MouseMsg); isMouse {
-		return m, nil
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		// In overlays, pane mode, or when the user has explicitly switched
+		// to terminal-native selection, our app-level handler stays out of
+		// the way.
+		if m.overlay.HasOpen() || m.activeKind == activePane || m.selectMode {
+			return m, nil
+		}
+		return m.handleMouse(mm), nil
 	}
 
 	if m.overlay.HasOpen() {
@@ -224,12 +667,62 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.md = nil
 		m.mdCache = nil
 		m.refreshViewport()
+		// Resize the active pane (if any) so the embedded child gets SIGWINCH.
+		if p := m.activePane(); p != nil {
+			w, h := m.paneSize()
+			p.Resize(w, h)
+		}
 		m.ready = true
 
 	case tea.KeyMsg:
+		// MASTER shortcuts always take precedence — even when a pane is
+		// active they're how the user navigates back out / opens dialogs.
 		switch {
 		case key.Matches(msg, m.keymap.Quit):
 			return m, m.openQuitDialog()
+		case key.Matches(msg, m.keymap.NewPane):
+			d := NewNewPaneDialog(m.initialCwd, m.styles)
+			return m, m.overlay.Open(d)
+		case key.Matches(msg, m.keymap.TilePicker):
+			items := m.collectTiles()
+			d := NewTilePickerDialog(items, m.styles)
+			return m, m.overlay.Open(d)
+		case key.Matches(msg, m.keymap.SelectMode):
+			// Toggle mouse capture: when off, the terminal regains native
+			// drag-to-select. The View() reads m.selectMode each frame and
+			// sets MouseMode accordingly.
+			m.selectMode = !m.selectMode
+			return m, nil
+		case key.Matches(msg, m.keymap.NewSession):
+			d := NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)
+			return m, m.overlay.Open(d)
+		case key.Matches(msg, m.keymap.Runs):
+			if m.runs == nil {
+				return m, nil
+			}
+			return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick)
+		case key.Matches(msg, m.keymap.NextSession):
+			m.cycleTab(1)
+			return m, nil
+		case key.Matches(msg, m.keymap.PrevSession):
+			m.cycleTab(-1)
+			return m, nil
+		}
+
+		// If a terminal pane has focus, all other keys are forwarded to its
+		// PTY (translated to xterm bytes). The pane-only Esc/Ctrl+W still
+		// fall through master switch above.
+		if p := m.activePane(); p != nil {
+			if pk, ok := msg.(tea.KeyPressMsg); ok {
+				if b := terminal.KeyToBytes(pk); b != nil {
+					_ = p.Send(b)
+				}
+			}
+			return m, nil
+		}
+
+		// Below: claude-session-only keys.
+		switch {
 		case key.Matches(msg, m.keymap.ClearOrCancel):
 			if !m.lastCtrlC.IsZero() && time.Since(m.lastCtrlC) < ctrlCDoubleWin {
 				// Second press → cancel current turn.
@@ -250,9 +743,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.layout()
 			}
 			return m, nil
-		case key.Matches(msg, m.keymap.NewSession):
-			d := NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)
-			return m, m.overlay.Open(d)
 		case key.Matches(msg, m.keymap.Rename):
 			cur := m.manager.Current()
 			if cur != nil {
@@ -260,26 +750,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.overlay.Open(d)
 			}
 			return m, nil
-		case key.Matches(msg, m.keymap.NextSession):
-			m.switchSession(func() { m.manager.Next() })
-			return m, nil
-		case key.Matches(msg, m.keymap.PrevSession):
-			m.switchSession(func() { m.manager.Prev() })
-			return m, nil
 		case key.Matches(msg, m.keymap.CloseSession):
-			cur := m.manager.Current()
-			if cur != nil {
-				m.manager.Close(cur.ID)
-				// Load the new current's draft (if any).
-				if next := m.manager.Current(); next != nil {
-					m.textarea.SetValue(next.Draft)
-					m.textarea.CursorEnd()
-				} else {
-					m.textarea.Reset()
+			// In claude mode close the active session; in pane mode close
+			// the active pane.
+			if m.activeKind == activePane && m.panes != nil {
+				if p := m.panes.Current(); p != nil {
+					m.panes.Close(p.ID)
+					if m.panes.Len() == 0 {
+						m.activeKind = activeClaude
+					}
 				}
-				m.layout()
-				m.refreshViewport()
+			} else {
+				cur := m.manager.Current()
+				if cur != nil {
+					m.manager.Close(cur.ID)
+					if next := m.manager.Current(); next != nil {
+						m.textarea.SetValue(next.Draft)
+						m.textarea.CursorEnd()
+					} else {
+						m.textarea.Reset()
+					}
+					m.layout()
+					m.refreshViewport()
+				}
 			}
+			m.saveState()
 			return m, nil
 		case key.Matches(msg, m.keymap.Send):
 			cur := m.manager.Current()
@@ -307,7 +802,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.refreshViewport()
 			m.viewport.GotoBottom()
-			return m, m.spinner.Tick
+			// Kick off both the spinner tick chain and the morphing-string
+			// anim. Each fires its own re-arm message; they die when the
+			// session goes back to idle.
+			return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
 		}
 
 	case sessionEventMsg:
@@ -326,13 +824,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 
 	case spinner.TickMsg:
-		if !m.anyThinking() {
+		// Keep ticking while any session is thinking OR any run is alive
+		// (so the logs viewer auto-tails) OR a modal that wants live data
+		// is open.
+		if !m.anyThinking() && !m.anyRunRunning() && !m.overlay.HasOpen() {
 			return m, tea.Batch(cmds...)
 		}
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
 		if cur := m.manager.Current(); cur != nil && cur.State == session.StateThinking {
 			m.refreshViewport()
+		}
+	case anim.StepMsg:
+		// Morphing-string spinner — only re-arm while at least one session
+		// is actively thinking. Crush calls this its anim.Anim cycle.
+		if msg.ID == m.thinkingAnim.ID() {
+			m.thinkingAnim.Tick()
+			if m.anyThinking() {
+				cmds = append(cmds, m.thinkingAnim.Step())
+				m.refreshViewport()
+			}
 		}
 	}
 
@@ -379,7 +890,7 @@ func (m Model) openQuitDialog() tea.Cmd {
 }
 
 func (m *Model) layout() {
-	mainW := m.width - sidebarWidth - 1
+	mainW := m.width - sidebarWidth - sidebarGap
 	if mainW < 20 {
 		mainW = 20
 	}
@@ -429,8 +940,30 @@ func (m *Model) refreshViewport() {
 		Styles:    m.styles,
 		LiveFrame: m.spinner.View(),
 		Markdown:  m.markdown,
+		ModelName: cur.Model,
 	}
-	m.viewport.SetContent(RenderTranscript(cur.Items, ctx))
+	out := RenderTranscript(cur.Items, ctx)
+	// Trailing morphing spinner while the assistant is responding.
+	if cur.State == session.StateThinking {
+		label := cur.LiveStatus() // "thinking" / "writing" / "running ToolName"
+		if label == "" {
+			label = "thinking"
+		}
+		m.thinkingAnim.SetLabel(label)
+		spinnerLine := m.styles.AssistantMsgBlurred.Render(m.thinkingAnim.Render())
+		if out != "" {
+			out += "\n\n"
+		}
+		out += spinnerLine
+	}
+	// Cache the unhighlighted version so copySelection can extract plain
+	// text from the same string the user is looking at.
+	m.lastTranscript = out
+	if m.hasSelection() {
+		sl, sc, el, ec := m.selectionRange()
+		out = highlight.Apply(out, m.viewport.Width(), lipgloss.Height(out), sl, sc, el, ec)
+	}
+	m.viewport.SetContent(out)
 }
 
 func (m *Model) welcomeText() string {
@@ -491,7 +1024,6 @@ func (m *Model) markdown(text string) string {
 }
 
 func (m Model) Run(ctx context.Context) error {
-	// AltScreen + MouseMode are now declared in View() (declarative model in v2).
 	p := tea.NewProgram(m,
 		tea.WithContext(ctx),
 		tea.WithFilter(mouseEventFilter),
@@ -500,11 +1032,69 @@ func (m Model) Run(ctx context.Context) error {
 		<-ctx.Done()
 		_ = time.AfterFunc(0, p.Quit)
 	}()
-	_, err := p.Run()
+	finalModel, err := p.Run()
+	// Persist before tearing down sessions so we capture the final draft.
+	if fm, ok := finalModel.(Model); ok {
+		fm.saveState()
+	} else {
+		m.saveState()
+	}
 	if m.manager != nil {
 		m.manager.CloseAll()
 	}
 	return err
+}
+
+// saveState snapshots EVERYTHING (sessions + panes + active tab) to
+// ~/.sunnytui/state.json. Called once at shutdown so the next run boots back
+// into the same layout.
+func (m Model) saveState() {
+	if m.manager == nil {
+		return
+	}
+	// Capture the in-flight textarea content into the current session's draft
+	// so it survives across restarts.
+	if cur := m.manager.Current(); cur != nil && m.activeKind == activeClaude {
+		cur.Draft = m.textarea.Value()
+	}
+	var sessions []state.SavedSession
+	for _, s := range m.manager.Sessions {
+		sessions = append(sessions, state.SavedSession{
+			Title:    s.Title,
+			Cwd:      s.Cwd,
+			Model:    s.Model,
+			Effort:   m.defaultEffort,
+			Draft:    s.Draft,
+			RemoteID: s.RemoteID,
+		})
+	}
+	var panes []state.SavedPane
+	if m.panes != nil {
+		for _, p := range m.panes.Panes {
+			panes = append(panes, state.SavedPane{
+				Title:   p.Title,
+				Command: p.Command,
+				Cwd:     p.Cwd,
+			})
+		}
+	}
+	kind := "claude"
+	idx := m.manager.Active
+	if m.activeKind == activePane && m.panes != nil {
+		kind = "pane"
+		idx = m.panes.Active
+	}
+	st := &state.State{
+		Sessions:   sessions,
+		Panes:      panes,
+		ActiveKind: kind,
+		ActiveIdx:  idx,
+	}
+	if err := state.Save(st); err != nil && m.logger != nil {
+		m.logger.Error("save state failed", "err", err)
+	} else if m.logger != nil {
+		m.logger.Info("state saved", "sessions", len(sessions), "panes", len(panes), "kind", kind, "idx", idx)
+	}
 }
 
 // mouseEventFilter throttles high-frequency mouse motion / wheel events to at
