@@ -15,15 +15,7 @@ import (
 func (m Model) View() tea.View {
 	v := tea.NewView("starting…")
 	v.AltScreen = true
-	// When the user toggles select mode (ctrl+s), drop mouse capture so the
-	// host terminal can do its native click-and-drag text selection. Wheel
-	// scroll inside the chat stops working in this state — but you can still
-	// scroll with pgup/pgdn. Toggle off (ctrl+s again) to restore wheel.
-	if m.selectMode {
-		v.MouseMode = tea.MouseModeNone
-	} else {
-		v.MouseMode = tea.MouseModeCellMotion
-	}
+	v.MouseMode = tea.MouseModeCellMotion
 	if !m.ready {
 		return v
 	}
@@ -127,7 +119,7 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles, m.logoFrame)
+	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles, m.logoFrame, m.sysStats)
 	// 3-col gap between sidebar and main — Crush-style breathing room, no
 	// vertical divider line.
 	gap := lipgloss.NewStyle().Width(sidebarGap).Height(bodyH).Render("")
@@ -196,12 +188,8 @@ func (m Model) renderStatus() string {
 	meta := fmt.Sprintf("%d sessions · %d turns", len(m.manager.Sessions), totalTurns)
 	right := m.styles.StatusDesc.Render(meta)
 
-	// Left side: select-mode badge wins, then session-error fallback.
 	var left string
-	if m.selectMode {
-		badge := m.styles.SelectModeBadge.Render("✂ SELECT MODE")
-		left = badge + m.styles.StatusDesc.Render(" ctrl+s to exit · drag with mouse · cmd+c copy")
-	} else if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
+	if cur := m.manager.Current(); cur != nil && cur.State == session.StateError && cur.LastErr != nil {
 		left = m.styles.ResultError.Render("error: " + cur.LastErr.Error())
 	}
 

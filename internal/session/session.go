@@ -2,12 +2,16 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,6 +20,10 @@ import (
 
 	"github.com/noesrafa/sunnytui/internal/claude"
 )
+
+// imageMarkerRE matches the placeholders we drop into the textarea on paste.
+// Captures the number so we can rejoin marker → Attachment when sending.
+var imageMarkerRE = regexp.MustCompile(`\[Image #(\d+)\]`)
 
 // ErrSessionBusy is returned by Send when a turn is already in flight. It is
 // an expected state, not a fault — callers should normally check State first
@@ -75,10 +83,31 @@ type Session struct {
 	// switches sessions and restored when they switch back.
 	Draft string
 
+	// Attachments are images the user has pasted into the current draft but
+	// not yet sent. Cleared on Send. Each carries the [Image #N] index that
+	// appears as a marker inside Draft.
+	Attachments   []Attachment
+	attachmentSeq int
+
 	Stream *claude.Stream
 
 	logger        *log.Logger
 	turnHadOutput bool
+}
+
+// AddAttachment registers a clipboard image with the session and returns
+// the 1-based index the caller should embed as "[Image #<idx>]" in the
+// textarea draft. Indices are monotonic per session lifetime; they are
+// not reused after sending so the user can paste, send, then paste again
+// without seeing duplicate markers in transcript.
+func (s *Session) AddAttachment(path, mediaType string) int {
+	s.attachmentSeq++
+	s.Attachments = append(s.Attachments, Attachment{
+		Index:     s.attachmentSeq,
+		Path:      path,
+		MediaType: mediaType,
+	})
+	return s.attachmentSeq
 }
 
 var idCounter atomic.Int64
@@ -169,22 +198,88 @@ func (s *Session) Cancel() error {
 
 // Send dispatches a user turn. Caller must check State == StateIdle;
 // otherwise ErrSessionBusy is returned without side effects.
+//
+// If the text contains "[Image #N]" markers and the session has matching
+// pending Attachments, they're spliced into the wire payload as image
+// content blocks (in order) and the attachment list is cleared. Markers
+// without a matching attachment are passed through as plain text.
 func (s *Session) Send(text string) error {
 	if s.State == StateThinking {
 		return ErrSessionBusy
 	}
-	s.logger.Debug("send", "len", len(text))
-	s.Items = append(s.Items, UserItem{Text: text})
+	blocks, used, err := s.buildContentBlocks(text)
+	if err != nil {
+		return err
+	}
+	s.logger.Debug("send", "len", len(text), "attachments", len(used))
+	s.Items = append(s.Items, UserItem{Text: text, Attachments: used})
+	s.Attachments = nil
 	s.State = StateThinking
 	s.StartedAt = time.Now()
 	s.turnHadOutput = false
-	if err := s.Stream.Send(text); err != nil {
+	if err := s.Stream.SendBlocks(blocks); err != nil {
 		s.State = StateError
 		s.LastErr = err
 		s.logger.Error("send failed", "err", err)
 		return err
 	}
 	return nil
+}
+
+// buildContentBlocks splits text by [Image #N] markers and interleaves
+// matching image blocks. Returns the wire blocks plus the resolved set of
+// attachments (so the UserItem can record what actually got sent).
+func (s *Session) buildContentBlocks(text string) ([]map[string]any, []Attachment, error) {
+	byIdx := make(map[int]Attachment, len(s.Attachments))
+	for _, a := range s.Attachments {
+		byIdx[a.Index] = a
+	}
+
+	var blocks []map[string]any
+	var used []Attachment
+	matches := imageMarkerRE.FindAllStringSubmatchIndex(text, -1)
+	pos := 0
+	flushText := func(end int) {
+		if end <= pos {
+			return
+		}
+		chunk := text[pos:end]
+		if strings.TrimSpace(chunk) == "" && len(blocks) > 0 {
+			// Avoid empty text blocks between images, but keep purely-whitespace
+			// chunks if they're the only thing in the message (handled below).
+			return
+		}
+		blocks = append(blocks, map[string]any{"type": "text", "text": chunk})
+	}
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		idx, _ := strconv.Atoi(text[m[2]:m[3]])
+		att, ok := byIdx[idx]
+		if !ok {
+			continue // leave the literal "[Image #N]" in place — text passthrough
+		}
+		flushText(start)
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read attachment %d: %w", idx, err)
+		}
+		blocks = append(blocks, map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": att.MediaType,
+				"data":       base64.StdEncoding.EncodeToString(data),
+			},
+		})
+		used = append(used, att)
+		delete(byIdx, idx) // a marker only resolves once
+		pos = end
+	}
+	flushText(len(text))
+	if len(blocks) == 0 {
+		blocks = []map[string]any{{"type": "text", "text": text}}
+	}
+	return blocks, used, nil
 }
 
 // HandleEvent ingests one decoded claude event and updates transcript + state.

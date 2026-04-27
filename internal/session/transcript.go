@@ -9,7 +9,19 @@ import (
 // Render lives in the tui package to keep this package UI-free.
 type Item interface{ sealed() }
 
-type UserItem struct{ Text string }
+// Attachment is a single image attached to a user turn. Path is absolute.
+// Index is the 1-based marker number that appears in the user text as
+// "[Image #N]" — kept here so the transcript renderer can rejoin them.
+type Attachment struct {
+	Index     int    `json:"index"`
+	Path      string `json:"path"`
+	MediaType string `json:"media_type"`
+}
+
+type UserItem struct {
+	Text        string       `json:"Text"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+}
 type AssistantTextItem struct{ Text string }
 type ThinkingItem struct{ Text string }
 

@@ -25,6 +25,15 @@ func RenderItem(it session.Item, ctx RenderContext) string {
 	case session.UserItem:
 		// Crush pattern: vertical ▌/│ border in primary + 1 col padding.
 		body := wrap(v.Text, ctx.Width-3) // -3 = border + padding + safety
+		if len(v.Attachments) > 0 {
+			lines := make([]string, 0, len(v.Attachments)+1)
+			lines = append(lines, body)
+			for _, a := range v.Attachments {
+				label := fmt.Sprintf("↳ [Image #%d] %s", a.Index, shortenPath(a.Path, ctx.Width-6))
+				lines = append(lines, s.Hint.Render(label))
+			}
+			body = strings.Join(lines, "\n")
+		}
 		return s.UserMsgBlurred.Render(body)
 
 	case session.AssistantTextItem:
@@ -146,6 +155,19 @@ func RenderTranscript(items []session.Item, ctx RenderContext) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// shortenPath collapses /Users/me/.sunnytui/images/foo.png down to fit
+// `width`. Keeps the basename, replaces middle with "…" if too long.
+func shortenPath(p string, width int) string {
+	if width <= 0 || lipgloss.Width(p) <= width {
+		return p
+	}
+	if width < 4 {
+		return p
+	}
+	keep := width - 1
+	return "…" + p[len(p)-keep:]
 }
 
 func wrap(text string, width int) string {

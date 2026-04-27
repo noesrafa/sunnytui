@@ -80,9 +80,15 @@ func NewStream(ctx context.Context, opts StreamOpts) (*Stream, error) {
 	return &Stream{cmd: cmd, stdin: stdin, events: out}, nil
 }
 
-// Send dispatches a user turn. Each call corresponds to one logical user
-// message and triggers exactly one assistant turn (one `result` event).
+// Send dispatches a user turn with a single text block. Convenience for
+// callers that don't need image / multi-block input.
 func (s *Stream) Send(text string) error {
+	return s.SendBlocks([]map[string]any{{"type": "text", "text": text}})
+}
+
+// SendBlocks dispatches a user turn with arbitrary content blocks (text +
+// image, in order). Each call triggers exactly one assistant turn.
+func (s *Stream) SendBlocks(blocks []map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -91,10 +97,8 @@ func (s *Stream) Send(text string) error {
 	payload := map[string]any{
 		"type": "user",
 		"message": map[string]any{
-			"role": "user",
-			"content": []map[string]any{
-				{"type": "text", "text": text},
-			},
+			"role":    "user",
+			"content": blocks,
 		},
 	}
 	line, err := json.Marshal(payload)

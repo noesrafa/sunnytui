@@ -10,6 +10,7 @@ import (
 	"github.com/noesrafa/sunnytui/internal/claude"
 	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
+	"github.com/noesrafa/sunnytui/internal/sysstats"
 	"github.com/noesrafa/sunnytui/internal/terminal"
 	"github.com/noesrafa/sunnytui/internal/usage"
 )
@@ -19,7 +20,7 @@ const (
 	sidebarGap   = 3 // empty cols between sidebar and main column
 )
 
-func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles, logoFrame int) string {
+func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles, logoFrame int, sys sysstats.Stats) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
 	rows := []string{renderLogo(innerW, s, logoFrame), ""}
@@ -32,7 +33,7 @@ func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal
 		rows = append(rows, "")
 		rows = append(rows, section...)
 	}
-	if section := renderUsageSection(mgr, innerW, s); len(section) > 0 {
+	if section := renderUsageSection(mgr, sys, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
 	}
@@ -85,12 +86,33 @@ func renderTermsSection(paneMgr *terminal.Manager, activePaneActive bool, innerW
 // populated when `sunnytui statusline` is registered with Claude Code) and
 // falls back to the rate_limit_event from stream-json (only has status +
 // reset time).
-func renderUsageSection(mgr *session.Manager, innerW int, s Styles) []string {
+func renderUsageSection(mgr *session.Manager, sys sysstats.Stats, innerW int, s Styles) []string {
 	usageRows := buildUsageWidget(mgr, innerW, s)
-	if len(usageRows) == 0 {
+	sysRows := buildSysStatsRows(sys, innerW, s)
+	if len(usageRows) == 0 && len(sysRows) == 0 {
 		return nil
 	}
-	return append(sectionHeader("usage", innerW, s), usageRows...)
+	header := sectionHeader("usage", innerW, s)
+	body := append([]string{}, usageRows...)
+	if len(usageRows) > 0 && len(sysRows) > 0 {
+		body = append(body, "") // visual gap between Claude usage and machine usage
+	}
+	body = append(body, sysRows...)
+	return append(header, body...)
+}
+
+// buildSysStatsRows renders the whole-machine cpu/ram bars under the
+// usage section. Sample==zero (e.g. sysstats.Sample failed or returned
+// before the first tick landed) means the section is rendered without
+// these rows — easier than threading "is initialized" through everything.
+func buildSysStatsRows(st sysstats.Stats, innerW int, s Styles) []string {
+	if st.CPUPct == 0 && st.MemPct == 0 {
+		return nil
+	}
+	return []string{
+		renderProgressBar("cpu", st.CPUPct, "", innerW, s),
+		renderProgressBar("ram", st.MemPct, "", innerW, s),
+	}
 }
 
 // renderRunsSection always shows once a manager exists, so the "press ctrl+u"
@@ -118,8 +140,7 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 		s.StatusKey.Render("ctrl+r") + s.Hint.Render(" rename"),
 		s.StatusKey.Render("ctrl+u") + s.Hint.Render(" runs"),
 		s.StatusKey.Render("ctrl+k") + s.Hint.Render(" switch"),
-		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" select"),
-		s.StatusKey.Render("ctrl+,") + s.Hint.Render(" settings"),
+		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" settings"),
 		s.StatusKey.Render("tab") + s.Hint.Render("    next"),
 		s.StatusKey.Render("ctrl+w") + s.Hint.Render(" close"),
 		s.StatusKey.Render("esc") + s.Hint.Render("    quit"),
@@ -251,13 +272,14 @@ func renderRateLimitFallback(rl *claude.RateLimitInfo, innerW int, s Styles) []s
 // to `colDanger` (red, near-cap), so the warmer colors only appear as the
 // bar fills towards the right — visually communicates risk without needing
 // per-percentage thresholds.
-func renderProgressBar(label string, pct int, reset string, innerW int, s Styles) string {
-	if pct < 0 {
-		pct = 0
+func renderProgressBar(label string, pctF float64, reset string, innerW int, s Styles) string {
+	if pctF < 0 {
+		pctF = 0
 	}
-	if pct > 100 {
-		pct = 100
+	if pctF > 100 {
+		pctF = 100
 	}
+	pct := int(pctF + 0.5)
 	pctStr := fmt.Sprintf("%3d%%", pct)
 	paddedLabel := fmt.Sprintf("%-3s", label)
 

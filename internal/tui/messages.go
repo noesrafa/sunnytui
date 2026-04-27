@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/noesrafa/sunnytui/internal/claude"
+import (
+	"github.com/noesrafa/sunnytui/internal/claude"
+	"github.com/noesrafa/sunnytui/internal/sysstats"
+)
 
 type sessionEventMsg struct {
 	SessionID string
@@ -31,3 +34,12 @@ type branchTickMsg struct{}
 // fast enough to read as motion and slow enough to be unobtrusive on
 // long-running sessions.
 type logoTickMsg struct{}
+
+// sysStatsTickMsg requests a fresh CPU/RAM sample. The handler returns a
+// sysStatsResultMsg once `top` has come back with output.
+type sysStatsTickMsg struct{}
+
+// sysStatsResultMsg carries one snapshot from sysstats.Sample.
+type sysStatsResultMsg struct {
+	Stats sysstats.Stats
+}

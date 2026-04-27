@@ -2,8 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"io"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,10 +21,12 @@ import (
 	"github.com/atotto/clipboard"
 
 	"github.com/noesrafa/sunnytui/internal/anim"
+	imgclip "github.com/noesrafa/sunnytui/internal/clipboard"
 	"github.com/noesrafa/sunnytui/internal/highlight"
 	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
 	"github.com/noesrafa/sunnytui/internal/state"
+	"github.com/noesrafa/sunnytui/internal/sysstats"
 	"github.com/noesrafa/sunnytui/internal/terminal"
 )
 
@@ -47,7 +52,6 @@ type Model struct {
 	runs          *runs.Manager
 	panes         *terminal.Manager
 	activeKind    activeKind
-	selectMode    bool // legacy escape hatch: drops mouse capture so terminal does native selection
 	overlay       *Overlay
 	initialCwd    string
 	defaultModel  string
@@ -80,6 +84,10 @@ type Model struct {
 	// logoFrame is the gradient-sweep counter. Driven by logoTickMsg, read
 	// by renderLogo to shift the per-column color ramp each tick.
 	logoFrame int
+
+	// sysStats holds the most recent CPU + RAM sample. Refreshed by a
+	// background tick (sysStatsTickCmd → sysStatsResultMsg).
+	sysStats sysstats.Stats
 }
 
 type Options struct {
@@ -147,6 +155,11 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	ta.KeyMap.DeleteWordForward = key.NewBinding(key.WithKeys("alt+d", "ctrl+delete"))
 	ta.KeyMap.DeleteWordBackward = key.NewBinding(key.WithKeys("alt+backspace", "ctrl+backspace"))
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("ctrl+j", "alt+enter", "shift+enter"))
+	// Disable textarea's built-in ctrl+v paste — it only knows how to read
+	// text from the clipboard (atotto.ReadAll) and silently drops image-only
+	// clipboards. We intercept ctrl+v ourselves so we can do the image-aware
+	// paste flow first, falling back to text when no image is present.
+	ta.KeyMap.Paste = key.NewBinding(key.WithDisabled())
 	ta.Focus()
 
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
@@ -223,7 +236,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd()}
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -541,6 +554,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmds []tea.Cmd
+	// Image paste: intercept BEFORE the textarea consumes the paste, so we
+	// can swap binary clipboard content for an "[Image #N]" marker. If the
+	// clipboard has no image, fall through and the textarea pastes text.
+	pasteHandled := false
+	if !m.overlay.HasOpen() {
+		if pm, ok := msg.(tea.PasteMsg); ok {
+			if m.tryImagePaste(pm.Content) {
+				pasteHandled = true
+			}
+		}
+	}
 	if m.overlay.HasOpen() {
 		if _, isKey := msg.(tea.KeyMsg); isKey {
 			return m, m.overlay.UpdateTop(msg)
@@ -574,9 +598,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logoTickMsg:
 		m.logoFrame++
 		cmds = append(cmds, logoTickCmd())
+	case sysStatsTickMsg:
+		// Tick fires the actual sample (off-thread); sample posts back via
+		// sysStatsResultMsg. We re-arm the tick from the result handler so
+		// a hung `top` doesn't queue overlapping samples.
+		cmds = append(cmds, sysStatsSampleCmd())
+	case sysStatsResultMsg:
+		m.sysStats = msg.Stats
+		cmds = append(cmds, sysStatsTickCmd())
 	}
 
-	if !m.overlay.HasOpen() {
+	if !m.overlay.HasOpen() && !pasteHandled {
 		var cmd tea.Cmd
 		prevValue := m.textarea.Value()
 		// Snapshot whether the user was reading the latest message
@@ -588,7 +620,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 		if m.textarea.Value() != prevValue {
-			m.layout() // dynamic textarea height
+			m.syncAttachmentMarkers() // drop attachments whose marker the user broke
+			m.layout()                // dynamic textarea height
 			if wasAtBottom {
 				m.viewport.GotoBottom()
 			}
@@ -836,7 +869,7 @@ func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 		// In overlays, pane mode, or when the user has explicitly switched
 		// to terminal-native selection, our app-level handler stays out of
 		// the way.
-		if m.overlay.HasOpen() || m.activeKind == activePane || m.selectMode {
+		if m.overlay.HasOpen() || m.activeKind == activePane {
 			return m, nil, true
 		}
 		return m.handleMouse(mm), nil, true
@@ -872,12 +905,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, m.overlay.Open(NewNewPaneDialog(m.initialCwd, m.styles)), true
 	case key.Matches(msg, m.keymap.TilePicker):
 		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
-	case key.Matches(msg, m.keymap.SelectMode):
-		// Toggle mouse capture: when off, the terminal regains native
-		// drag-to-select. The View() reads m.selectMode each frame and
-		// sets MouseMode accordingly.
-		m.selectMode = !m.selectMode
-		return m, nil, true
 	case key.Matches(msg, m.keymap.Settings):
 		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
@@ -892,6 +919,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	case key.Matches(msg, m.keymap.PrevSession):
 		m.cycleTab(-1)
+		return m, nil, true
+	case key.Matches(msg, m.keymap.CloseSession):
+		// Handled here (above the pane-forward block) so ctrl+w closes
+		// the active terminal pane instead of getting eaten by the shell
+		// inside it as a "delete word" keystroke.
+		m.handleCloseTab()
 		return m, nil, true
 	}
 
@@ -919,14 +952,37 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			return m, m.overlay.Open(NewRenameDialog(cur.Title, m.styles)), true
 		}
 		return m, nil, true
-	case key.Matches(msg, m.keymap.CloseSession):
-		m.handleCloseTab()
-		return m, nil, true
 	case key.Matches(msg, m.keymap.Send):
 		next, cmd := m.handleSend()
 		return next, cmd, true
+	case key.Matches(msg, m.keymap.Paste):
+		m.handlePaste()
+		return m, nil, true
 	}
 	return m, nil, false
+}
+
+// handlePaste runs the image-aware paste flow: image clipboard first
+// (saves + drops "[Image #N]" marker), then falls back to plain text via
+// atotto when there's no image. Triggered by Ctrl+V — terminals don't
+// forward Cmd+V as bracketed paste when the clipboard is image-only.
+func (m *Model) handlePaste() {
+	if m.tryImagePaste("") {
+		return
+	}
+	text, err := clipboard.ReadAll()
+	if err != nil {
+		m.logger.Debug("clipboard text read", "err", err)
+		return
+	}
+	if text == "" {
+		return
+	}
+	m.textarea.InsertString(text)
+	if cur := m.manager.Current(); cur != nil {
+		cur.Draft = m.textarea.Value()
+	}
+	m.layout()
 }
 
 func (m *Model) handleClearOrCancel() {
@@ -945,6 +1001,10 @@ func (m *Model) handleClearOrCancel() {
 	m.textarea.Reset()
 	if cur := m.manager.Current(); cur != nil {
 		cur.Draft = ""
+		// Drop any pending pasted images too — their markers vanished with
+		// the textarea reset, so keeping them would only let stale images
+		// resolve into a future message by accident.
+		cur.Attachments = nil
 	}
 	m.lastCtrlC = time.Now()
 	m.layout()
@@ -974,6 +1034,94 @@ func (m *Model) handleCloseTab() {
 		m.refreshViewport()
 	}
 	m.saveState()
+}
+
+// syncAttachmentMarkers reconciles the textarea against pending
+// attachments. If the user damaged a marker (e.g., backspaced over the
+// closing bracket of "[Image #2]"), we drop that attachment from the
+// pending list, scrub any orphan fragment from the textarea, and delete
+// the file from disk — it has never been sent and will never be sent.
+//
+// Called after every textarea-mutating keystroke. Cheap: O(pending
+// attachments × textarea length).
+func (m *Model) syncAttachmentMarkers() {
+	cur := m.manager.Current()
+	if cur == nil || len(cur.Attachments) == 0 {
+		return
+	}
+	text := m.textarea.Value()
+	cleaned := text
+	kept := cur.Attachments[:0]
+	for _, a := range cur.Attachments {
+		marker := fmt.Sprintf("[Image #%d]", a.Index)
+		if strings.Contains(cleaned, marker) {
+			kept = append(kept, a)
+			continue
+		}
+		// Marker broken. Strip whatever fragment of it is still hanging
+		// around so the textarea doesn't show "[Image #2" forever, then
+		// delete the unused file.
+		fragment := regexp.MustCompile(fmt.Sprintf(`\[?Image\s*#?\s*%d\b\]?`, a.Index))
+		cleaned = fragment.ReplaceAllString(cleaned, "")
+		if err := os.Remove(a.Path); err != nil && !os.IsNotExist(err) {
+			m.logger.Debug("remove orphan image", "path", a.Path, "err", err)
+		}
+		m.logger.Info("attachment dropped",
+			"session", cur.ID,
+			"idx", a.Index,
+			"path", a.Path,
+		)
+	}
+	cur.Attachments = kept
+	if cleaned != text {
+		m.textarea.SetValue(cleaned)
+		m.textarea.CursorEnd()
+		cur.Draft = cleaned
+	}
+}
+
+// tryImagePaste peeks at the system clipboard for image data. If found, it
+// saves the bytes under ~/.sunnytui/images/, registers an attachment on
+// the active session, and inserts the matching "[Image #N]" marker at the
+// textarea cursor. Any text that came along in the bracketed paste is
+// inserted right after the marker so users don't lose accompanying text.
+//
+// Returns true when the message has been fully handled (the caller MUST
+// skip forwarding the original PasteMsg to the textarea, or the binary
+// junk will land as garbled glyphs).
+func (m *Model) tryImagePaste(text string) bool {
+	cur := m.manager.Current()
+	if cur == nil {
+		return false
+	}
+	data, mediaType, ok, err := imgclip.ReadImage()
+	if err != nil {
+		m.logger.Debug("clipboard image read", "err", err)
+	}
+	if !ok {
+		return false
+	}
+	path, err := imgclip.SaveImage(data, mediaType)
+	if err != nil {
+		m.logger.Warn("save attachment", "err", err)
+		return false
+	}
+	idx := cur.AddAttachment(path, mediaType)
+	marker := fmt.Sprintf("[Image #%d]", idx)
+	insert := marker
+	if text != "" {
+		insert = marker + " " + text
+	}
+	m.textarea.InsertString(insert)
+	cur.Draft = m.textarea.Value()
+	m.layout()
+	m.logger.Info("image pasted",
+		"session", cur.ID,
+		"idx", idx,
+		"path", path,
+		"bytes", len(data),
+	)
+	return true
 }
 
 func (m Model) handleSend() (Model, tea.Cmd) {
@@ -1054,6 +1202,22 @@ func branchTickCmd() tea.Cmd {
 // terminals. Each tick increments Model.logoFrame and re-arms itself.
 func logoTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return logoTickMsg{} })
+}
+
+// sysStatsTickCmd is the metronome for CPU/RAM sampling — 4s cadence
+// keeps the bars feeling live without making `top` a measurable share of
+// our own CPU footprint. Tick → sample → tick is intentionally split
+// across two messages so the actual `top` invocation runs off the main
+// loop.
+func sysStatsTickCmd() tea.Cmd {
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return sysStatsTickMsg{} })
+}
+
+func sysStatsSampleCmd() tea.Cmd {
+	return func() tea.Msg {
+		st, _ := sysstats.Sample()
+		return sysStatsResultMsg{Stats: st}
+	}
 }
 
 func (m *Model) handleBranchTick() tea.Cmd {
@@ -1234,6 +1398,7 @@ func (m *Model) markdown(text string) string {
 }
 
 func (m Model) Run(ctx context.Context) error {
+	m.pruneOrphanImages()
 	p := tea.NewProgram(m,
 		tea.WithContext(ctx),
 		tea.WithFilter(mouseEventFilter),
@@ -1253,6 +1418,37 @@ func (m Model) Run(ctx context.Context) error {
 		m.manager.CloseAll()
 	}
 	return err
+}
+
+// pruneOrphanImages walks every session's transcript, collects the
+// image paths still referenced by past UserItems, and deletes any other
+// file under ~/.sunnytui/images/. Pending (unsent) attachments aren't
+// included because the app just started — there's nothing pending yet.
+// Best-effort; failures only get logged.
+func (m Model) pruneOrphanImages() {
+	if m.manager == nil {
+		return
+	}
+	refs := map[string]bool{}
+	for _, s := range m.manager.Sessions {
+		for _, it := range s.Items {
+			u, ok := it.(session.UserItem)
+			if !ok {
+				continue
+			}
+			for _, a := range u.Attachments {
+				refs[a.Path] = true
+			}
+		}
+	}
+	n, err := imgclip.PruneOrphans(refs)
+	if err != nil {
+		m.logger.Warn("prune images", "err", err)
+		return
+	}
+	if n > 0 {
+		m.logger.Info("pruned orphan images", "count", n)
+	}
 }
 
 // saveState snapshots EVERYTHING (sessions + panes + active tab) to

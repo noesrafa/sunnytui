@@ -24,9 +24,15 @@ import (
 )
 
 // Window is a single rate-limit bucket as Claude Code reports it.
+//
+// UsedPercentage is float64 even though it's usually an integer — Claude
+// Code occasionally emits values like 7.000000000000001 (FP arithmetic
+// noise from internal aggregation), and an int-typed field would refuse
+// to decode them, knocking the whole snapshot offline and dropping the
+// sidebar back to the "ok" rate_limit_event fallback.
 type Window struct {
-	UsedPercentage int   `json:"used_percentage"`
-	ResetsAt       int64 `json:"resets_at"` // unix seconds
+	UsedPercentage float64 `json:"used_percentage"`
+	ResetsAt       int64   `json:"resets_at"` // unix seconds
 }
 
 // Payload is a subset of the Claude Code statusline stdin JSON we care about.
@@ -37,8 +43,8 @@ type Payload struct {
 	} `json:"model,omitempty"`
 
 	ContextWindow *struct {
-		ContextWindowSize int `json:"context_window_size"`
-		UsedPercentage    int `json:"used_percentage"`
+		ContextWindowSize int     `json:"context_window_size"`
+		UsedPercentage    float64 `json:"used_percentage"`
 	} `json:"context_window,omitempty"`
 
 	RateLimits *struct {

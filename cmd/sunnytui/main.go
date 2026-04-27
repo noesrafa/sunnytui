@@ -125,10 +125,10 @@ func runStatusline() error {
 	if p, _, perr := usage.Read(0); perr == nil && p != nil && p.RateLimits != nil {
 		var parts []string
 		if w := p.RateLimits.FiveHour; w != nil {
-			parts = append(parts, fmt.Sprintf("5h %d%%", w.UsedPercentage))
+			parts = append(parts, fmt.Sprintf("5h %d%%", int(w.UsedPercentage+0.5)))
 		}
 		if w := p.RateLimits.SevenDay; w != nil {
-			parts = append(parts, fmt.Sprintf("7d %d%%", w.UsedPercentage))
+			parts = append(parts, fmt.Sprintf("7d %d%%", int(w.UsedPercentage+0.5)))
 		}
 		fmt.Println("☀ " + strings.Join(parts, " · "))
 	} else {
