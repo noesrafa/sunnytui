@@ -510,10 +510,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.applyResize(msg)
 	case tea.KeyMsg:
-		next, cmd := m.updateKey(msg)
-		// updateKey never falls through to textarea/viewport — it always
-		// owns its key fully (or no-ops).
-		return next, cmd
+		next, cmd, handled := m.updateKey(msg)
+		if handled {
+			return next, cmd
+		}
+		m = next
+		cmds = append(cmds, cmd)
 	case sessionEventMsg:
 		cmds = append(cmds, m.handleSessionEvent(msg))
 	case sessionClosedMsg:
@@ -743,38 +745,38 @@ func (m *Model) applyResize(msg tea.WindowSizeMsg) {
 }
 
 // updateKey is the tea.KeyMsg dispatcher: master shortcuts → pane-forwarding
-// → claude-session keys. Owns the key event fully; never falls through to
-// textarea/viewport (the textarea consumes characters via the master Update
-// loop's fallthrough only for non-key events).
-func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+// → claude-session keys. Returns handled=true when the key was consumed; when
+// false, the dispatcher falls through to textarea/viewport so character input
+// reaches the editor.
+func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	// MASTER shortcuts always take precedence — even when a pane is
 	// active they're how the user navigates back out / opens dialogs.
 	switch {
 	case key.Matches(msg, m.keymap.Quit):
-		return m, m.openQuitDialog()
+		return m, m.openQuitDialog(), true
 	case key.Matches(msg, m.keymap.NewPane):
-		return m, m.overlay.Open(NewNewPaneDialog(m.initialCwd, m.styles))
+		return m, m.overlay.Open(NewNewPaneDialog(m.initialCwd, m.styles)), true
 	case key.Matches(msg, m.keymap.TilePicker):
-		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles))
+		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
 	case key.Matches(msg, m.keymap.SelectMode):
 		// Toggle mouse capture: when off, the terminal regains native
 		// drag-to-select. The View() reads m.selectMode each frame and
 		// sets MouseMode accordingly.
 		m.selectMode = !m.selectMode
-		return m, nil
+		return m, nil, true
 	case key.Matches(msg, m.keymap.NewSession):
-		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles))
+		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)), true
 	case key.Matches(msg, m.keymap.Runs):
 		if m.runs == nil {
-			return m, nil
+			return m, nil, true
 		}
-		return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick)
+		return m, tea.Batch(m.overlay.Open(NewRunsDialog(m.runs, m.styles)), m.spinner.Tick), true
 	case key.Matches(msg, m.keymap.NextSession):
 		m.cycleTab(1)
-		return m, nil
+		return m, nil, true
 	case key.Matches(msg, m.keymap.PrevSession):
 		m.cycleTab(-1)
-		return m, nil
+		return m, nil, true
 	}
 
 	// If a terminal pane has focus, all other keys are forwarded to its
@@ -788,26 +790,27 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 				}
 			}
 		}
-		return m, nil
+		return m, nil, true
 	}
 
 	// Below: claude-session-only keys.
 	switch {
 	case key.Matches(msg, m.keymap.ClearOrCancel):
 		m.handleClearOrCancel()
-		return m, nil
+		return m, nil, true
 	case key.Matches(msg, m.keymap.Rename):
 		if cur := m.manager.Current(); cur != nil {
-			return m, m.overlay.Open(NewRenameDialog(cur.Title, m.styles))
+			return m, m.overlay.Open(NewRenameDialog(cur.Title, m.styles)), true
 		}
-		return m, nil
+		return m, nil, true
 	case key.Matches(msg, m.keymap.CloseSession):
 		m.handleCloseTab()
-		return m, nil
+		return m, nil, true
 	case key.Matches(msg, m.keymap.Send):
-		return m.handleSend()
+		next, cmd := m.handleSend()
+		return next, cmd, true
 	}
-	return m, nil
+	return m, nil, false
 }
 
 func (m *Model) handleClearOrCancel() {
