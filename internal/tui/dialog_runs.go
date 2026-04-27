@@ -158,10 +158,3 @@ func runStatusIcon(r *runs.Run, s Styles) string {
 		return s.Hint.Render("○")
 	}
 }
-
-func padRight(s string, w int) string {
-	if len(s) >= w {
-		return s + " "
-	}
-	return s + strings.Repeat(" ", w-len(s))
-}

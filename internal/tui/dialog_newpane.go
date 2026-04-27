@@ -12,13 +12,6 @@ import (
 	"github.com/noesrafa/sunnytui/internal/favs"
 )
 
-func defaultShell() string {
-	if s := os.Getenv("SHELL"); s != "" {
-		return s
-	}
-	return "/bin/bash"
-}
-
 type NewPaneDialog struct {
 	nameIn    textinput.Model
 	cmdIn     textinput.Model
