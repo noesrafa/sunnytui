@@ -52,6 +52,7 @@ type Model struct {
 	initialCwd    string
 	defaultModel  string
 	defaultEffort string
+	themeID       string // active theme; persisted in state.json
 	skipPerms     bool
 	lastErr       error
 	lastCtrlC     time.Time
@@ -75,6 +76,10 @@ type Model struct {
 	// Morphing-string spinner shown during assistant streaming. One global
 	// instance — the active session's "Thinking" label drives it.
 	thinkingAnim *anim.Anim
+
+	// logoFrame is the gradient-sweep counter. Driven by logoTickMsg, read
+	// by renderLogo to shift the per-column color ramp each tick.
+	logoFrame int
 }
 
 type Options struct {
@@ -87,6 +92,9 @@ type Options struct {
 	// InitialActiveKind ("claude" | "pane") restores which kind of tab was
 	// focused at the previous shutdown. Empty defaults to claude.
 	InitialActiveKind string
+	// InitialTheme is the persisted theme ID from state.json. Empty falls
+	// back to the default (Themes[0]).
+	InitialTheme string
 }
 
 const (
@@ -98,9 +106,18 @@ const (
 	// mdCacheMax bounds the markdown render cache. Past this size we drop the
 	// whole map — long sessions otherwise grow it forever.
 	mdCacheMax = 512
+	// inputTopGap is the number of empty rows reserved above the input
+	// box so the assistant attribution row doesn't sit flush against the
+	// input border. Reserved in layout() and rendered in renderMain().
+	inputTopGap = 4
 )
 
 func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts Options) Model {
+	// Apply the persisted theme before building styles so every Style picks
+	// up the right palette on first render. Unknown IDs fall back to the
+	// default theme.
+	theme := ThemeByID(opts.InitialTheme)
+	SetPalette(theme.P)
 	st := DefaultStyles()
 	km := DefaultKeyMap()
 
@@ -138,6 +155,30 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	vp := viewport.New()
 	vp.SetWidth(80)
 	vp.SetHeight(20)
+	// SoftWrap = chat content always wraps to viewport width instead of
+	// allowing horizontal scroll. Long code lines, ASCII tables, etc.
+	// would otherwise let the user scroll the chat sideways and break
+	// the layout. This is the safety net beneath our manual wrappers
+	// (glamour WordWrap, lipgloss width-aware renders).
+	vp.SoftWrap = true
+	// In a chat we can't have the viewport eating letter keys: the
+	// default KeyMap treats j/k/h/l/u/d/b/f/space as scroll commands,
+	// so typing words like "kubernetes" or "javascript" would pan the
+	// transcript while you wrote them. Replace the default KeyMap with
+	// only PgUp/PgDn — same idea Crush uses for its log dialog
+	// (internal/ui/dialog/permissions.go) but stricter, since textarea
+	// owns the rest. Mouse wheel is handled separately in updateMouse.
+	disabled := key.NewBinding(key.WithDisabled())
+	vp.KeyMap = viewport.KeyMap{
+		PageUp:       key.NewBinding(key.WithKeys("pgup")),
+		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
+		HalfPageUp:   disabled,
+		HalfPageDown: disabled,
+		Up:           disabled,
+		Down:         disabled,
+		Left:         disabled,
+		Right:        disabled,
+	}
 
 	thinking := anim.New(anim.Settings{
 		Size:       12,
@@ -176,12 +217,13 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		initialCwd:    initialCwd,
 		defaultModel:  defModel,
 		defaultEffort: defEffort,
+		themeID:       theme.ID,
 		skipPerms:     opts.DangerousSkipPermissions,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink}
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -527,15 +569,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	case anim.StepMsg:
 		cmds = append(cmds, m.handleAnimStep(msg))
+	case branchTickMsg:
+		cmds = append(cmds, m.handleBranchTick())
+	case logoTickMsg:
+		m.logoFrame++
+		cmds = append(cmds, logoTickCmd())
 	}
 
 	if !m.overlay.HasOpen() {
 		var cmd tea.Cmd
 		prevValue := m.textarea.Value()
+		// Snapshot whether the user was reading the latest message
+		// BEFORE the textarea consumes the key. If they were pinned to
+		// bottom and typing grows the textarea, we want to stay pinned
+		// after layout shrinks the viewport; if they had scrolled up
+		// to read history, we leave their position alone.
+		wasAtBottom := m.viewport.AtBottom()
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 		if m.textarea.Value() != prevValue {
 			m.layout() // dynamic textarea height
+			if wasAtBottom {
+				m.viewport.GotoBottom()
+			}
 		}
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
@@ -629,8 +685,56 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		m.saveState()
 		return m, nil, true
+	case PreviewThemeMsg:
+		// Live preview while user navigates the picker. Repaint only —
+		// don't close or persist; the dialog still owns the decision.
+		m.repaint(v.ID)
+		return m, nil, true
+	case ApplyThemeMsg:
+		// User pressed enter — commit the choice.
+		m.overlay.CloseTop()
+		m.repaint(v.ID)
+		m.saveState()
+		m.logger.Info("theme applied", "id", v.ID)
+		return m, nil, true
+	case CancelSettingsMsg:
+		// User pressed esc — roll back to whatever was active before
+		// they opened the dialog.
+		m.overlay.CloseTop()
+		m.repaint(v.OriginalID)
+		return m, nil, true
 	}
 	return m, nil, false
+}
+
+// repaint swaps the active palette and re-applies it everywhere a Style
+// got copied at construction time. Called by all three settings flows
+// (preview, apply, cancel); only apply also closes the overlay and saves.
+//
+//   - m.styles is fully rebuilt from the new palette globals.
+//   - The textarea owns its own Styles struct; without re-applying it,
+//     the cursor color / placeholder color / prompt color stick to the
+//     previous theme until a restart.
+//   - The spinner stores a Style on its struct, so it's re-set explicitly.
+//   - The morphing-thinking anim stores its gradient colors as fields;
+//     SetColors swaps them without resetting the morph state.
+//   - Glamour bakes ANSI codes into its output; m.md + m.mdCache are
+//     thrown away so transcripts re-render against the new palette.
+func (m *Model) repaint(id string) {
+	t := ThemeByID(id)
+	SetPalette(t.P)
+	m.styles = DefaultStyles()
+	m.themeID = t.ID
+
+	m.textarea.SetStyles(m.styles.EditorTextarea)
+	m.spinner.Style = lipgloss.NewStyle().Foreground(colWarning)
+	if m.thinkingAnim != nil {
+		m.thinkingAnim.SetColors(colSecondary, colPrimary, colText)
+	}
+
+	m.md = nil
+	m.mdCache = nil
+	m.refreshViewport()
 }
 
 func (m Model) createPane(v CreatePaneMsg) (Model, tea.Cmd, bool) {
@@ -712,6 +816,16 @@ func (m *Model) switchToTab(kind string, index int) {
 // only for genuine MouseMsg values — other messages fall through unchanged.
 func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 	if mm, isWheel := msg.(tea.MouseWheelMsg); isWheel {
+		// Drop horizontal wheel events outright — trackpads emit them
+		// on lateral swipes and shift+wheel, both of which would scroll
+		// the chat sideways since SoftWrap can't help once the viewport
+		// has accepted an xOffset. Keep vertical wheel for scrolling.
+		if mm.Button == tea.MouseWheelLeft || mm.Button == tea.MouseWheelRight {
+			return m, nil, true
+		}
+		if mm.Mod.Contains(tea.ModShift) {
+			return m, nil, true
+		}
 		var cmd tea.Cmd
 		if !m.overlay.HasOpen() {
 			m.viewport, cmd = m.viewport.Update(mm)
@@ -764,6 +878,8 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 		// sets MouseMode accordingly.
 		m.selectMode = !m.selectMode
 		return m, nil, true
+	case key.Matches(msg, m.keymap.Settings):
+		return m, m.overlay.Open(NewSettingsDialog(m.themeID, m.styles)), true
 	case key.Matches(msg, m.keymap.NewSession):
 		return m, m.overlay.Open(NewNewSessionDialog(m.initialCwd, m.defaultModel, m.defaultEffort, m.styles)), true
 	case key.Matches(msg, m.keymap.Runs):
@@ -897,10 +1013,16 @@ func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
 	if sess == nil {
 		return nil
 	}
+	wasThinking := sess.State == session.StateThinking
 	sess.HandleEvent(msg.Event)
 	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
 		m.refreshViewport()
 		m.viewport.GotoBottom()
+	}
+	// Persist after each turn so a crash mid-session doesn't lose the
+	// transcript. The turn boundary is the state.Idle transition.
+	if wasThinking && sess.State == session.StateIdle {
+		m.saveState()
 	}
 	return waitForSession(sess)
 }
@@ -918,6 +1040,33 @@ func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
 		m.refreshViewport()
 	}
 	return m, cmd
+}
+
+// branchTickCmd schedules the next branch poll. Cheap (one `git -C cwd
+// branch --show-current` per session every few seconds), so the input-hint
+// row reflects checkouts done outside the TUI in near real time.
+func branchTickCmd() tea.Cmd {
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return branchTickMsg{} })
+}
+
+// logoTickCmd drives the brand-mark gradient sweep. 120ms cadence keeps
+// the animation visible without saturating the program loop on idle
+// terminals. Each tick increments Model.logoFrame and re-arms itself.
+func logoTickCmd() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return logoTickMsg{} })
+}
+
+func (m *Model) handleBranchTick() tea.Cmd {
+	changed := false
+	for _, s := range m.manager.Sessions {
+		if s.RefreshBranch() {
+			changed = true
+		}
+	}
+	if changed {
+		m.refreshViewport()
+	}
+	return branchTickCmd()
 }
 
 func (m *Model) handleAnimStep(msg anim.StepMsg) tea.Cmd {
@@ -962,7 +1111,8 @@ func (m *Model) layout() {
 	}
 	inputBoxH := taH + 2 // border
 	hintH := 1           // hint row below input
-	vpH := bodyH - inputBoxH - hintH
+	gapH := inputTopGap  // breathing room above the input box
+	vpH := bodyH - inputBoxH - hintH - gapH
 	if vpH < 3 {
 		vpH = 3
 	}
@@ -1119,13 +1269,24 @@ func (m Model) saveState() {
 	}
 	var sessions []state.SavedSession
 	for _, s := range m.manager.Sessions {
+		// Marshal the transcript so it survives restart. Errors here would
+		// only happen if a new Item type was added without a marshaller —
+		// log but don't drop the session metadata.
+		raw, mErr := session.MarshalItems(s.Items)
+		if mErr != nil {
+			m.logger.Warn("marshal items", "session", s.ID, "err", mErr)
+			raw = nil
+		}
 		sessions = append(sessions, state.SavedSession{
-			Title:    s.Title,
-			Cwd:      s.Cwd,
-			Model:    s.Model,
-			Effort:   m.defaultEffort,
-			Draft:    s.Draft,
-			RemoteID: s.RemoteID,
+			Title:     s.Title,
+			Cwd:       s.Cwd,
+			Model:     s.Model,
+			Effort:    m.defaultEffort,
+			Draft:     s.Draft,
+			RemoteID:  s.RemoteID,
+			Items:     raw,
+			TotalCost: s.TotalCost,
+			Turns:     s.Turns,
 		})
 	}
 	var panes []state.SavedPane
@@ -1149,6 +1310,7 @@ func (m Model) saveState() {
 		Panes:      panes,
 		ActiveKind: kind,
 		ActiveIdx:  idx,
+		Theme:      m.themeID,
 	}
 	if err := state.Save(st); err != nil {
 		m.logger.Error("save state failed", "err", err)

@@ -85,3 +85,19 @@ type SwitchTabMsg struct {
 	Kind  string // "claude" | "pane"
 	Index int
 }
+
+// PreviewThemeMsg is emitted while the user navigates the settings picker
+// with arrow keys. The root model swaps the active palette in place — no
+// dialog close, no persistence — so the user sees a live preview of the
+// hovered theme. Cancelling (esc) sends one last preview targeting the
+// original theme to undo the visual changes.
+type PreviewThemeMsg struct{ ID string }
+
+// ApplyThemeMsg commits the picked theme: swap palette, close the dialog,
+// persist the choice to state.json. Emitted only when the user presses
+// enter on a row in the picker.
+type ApplyThemeMsg struct{ ID string }
+
+// CancelSettingsMsg is emitted on esc. Reverts the live preview back to
+// the theme the user had at dialog-open time and closes the dialog.
+type CancelSettingsMsg struct{ OriginalID string }

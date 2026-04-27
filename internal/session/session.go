@@ -96,6 +96,12 @@ type Options struct {
 	ResumeID                 string // claude session_id to --resume on startup
 	Title                    string // override default basename(cwd) title (used by state restore)
 	Draft                    string // pre-populate the textarea draft (state restore)
+
+	// State-restore extras. Only consumed when reopening a previously-open
+	// session — fresh sessions leave them zero.
+	Items     []Item
+	TotalCost float64
+	Turns     int
 }
 
 func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
@@ -124,16 +130,32 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 		title = filepath.Base(cwd)
 	}
 	return &Session{
-		ID:       id,
-		Cwd:      cwd,
-		Title:    title,
-		Branch:   gitBranch(cwd),
-		RemoteID: opts.ResumeID, // optimistic; will be confirmed when init event arrives
-		Draft:    opts.Draft,
-		Stream:   stream,
-		State:    StateIdle,
-		logger:   logger,
+		ID:        id,
+		Cwd:       cwd,
+		Title:     title,
+		Model:     opts.Model,
+		Branch:    gitBranch(cwd),
+		RemoteID:  opts.ResumeID, // optimistic; will be confirmed when init event arrives
+		Draft:     opts.Draft,
+		Items:     opts.Items,
+		TotalCost: opts.TotalCost,
+		Turns:     opts.Turns,
+		Stream:    stream,
+		State:     StateIdle,
+		logger:    logger,
 	}, nil
+}
+
+// RefreshBranch re-reads the current git branch of Cwd and updates Branch.
+// Returns true if the branch changed, so the caller can decide whether to
+// re-render. Cheap (single git invocation), but callers should still throttle.
+func (s *Session) RefreshBranch() bool {
+	b := gitBranch(s.Cwd)
+	if b == s.Branch {
+		return false
+	}
+	s.Branch = b
+	return true
 }
 
 // Cancel interrupts the current turn (SIGINT to the claude subprocess).

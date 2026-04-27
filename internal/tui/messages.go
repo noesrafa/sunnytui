@@ -22,3 +22,12 @@ type paneClosedMsg struct {
 	PaneID string
 	Err    error
 }
+
+// branchTickMsg is fired every few seconds so the input-hint row can pick up
+// branch changes (e.g. user ran `git checkout` in another terminal).
+type branchTickMsg struct{}
+
+// logoTickMsg drives the SUNNY-letters gradient sweep. One per ~120ms is
+// fast enough to read as motion and slow enough to be unobtrusive on
+// long-running sessions.
+type logoTickMsg struct{}

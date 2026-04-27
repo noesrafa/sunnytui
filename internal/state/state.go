@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 )
 
-const Version = 2 // bumped when Panes was added
+const Version = 3 // bumped when Items (transcript persistence) was added
 
 type SavedSession struct {
 	Title    string `json:"title"`
@@ -24,6 +24,16 @@ type SavedSession struct {
 	Effort   string `json:"effort,omitempty"`
 	Draft    string `json:"draft,omitempty"`
 	RemoteID string `json:"remote_id,omitempty"` // claude session_id, used with --resume
+
+	// Items is the JSON-encoded transcript for this session
+	// (session.MarshalItems / UnmarshalItems). Stored as raw bytes so the
+	// state package stays decoupled from the session item types.
+	Items json.RawMessage `json:"items,omitempty"`
+
+	// Cumulative cost + turn counter, persisted so the sidebar stays
+	// meaningful immediately after restore (before any new event arrives).
+	TotalCost float64 `json:"total_cost,omitempty"`
+	Turns     int     `json:"turns,omitempty"`
 }
 
 type SavedPane struct {
@@ -38,6 +48,11 @@ type State struct {
 	Panes      []SavedPane    `json:"panes,omitempty"`
 	ActiveKind string         `json:"active_kind,omitempty"` // "claude" | "pane"
 	ActiveIdx  int            `json:"active_idx"`            // index within ActiveKind's manager
+
+	// Theme is the persisted theme ID (see internal/tui themes.go for the
+	// catalog). Empty means "use the default" — the TUI's ThemeByID falls
+	// back to Themes[0] for unknown values, so it's safe to leave blank.
+	Theme string `json:"theme,omitempty"`
 }
 
 func path() (string, error) {

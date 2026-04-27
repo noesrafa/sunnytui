@@ -1,34 +1,60 @@
 package tui
 
 import (
+	"image/color"
+
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
-// Fixed dark-theme palette. We avoid lipgloss.AdaptiveColor on purpose because
-// adaptive colors trigger an OSC 11 query at runtime to detect the terminal
-// background; that query's response was leaking back into the textarea on
-// terminals that don't immediately drain it. Hardcoded colors remove the
-// trigger entirely.
-// Charmtone palette — same colors Crush uses (verified against
-// /tmp/charm-x/exp/charmtone/charmtone.go). We adopt them outright so the
-// editor cursor + prompt feel pixel-identical.
+// Fixed-palette colors. We avoid lipgloss.AdaptiveColor on purpose because
+// adaptive colors trigger an OSC 11 query at runtime to detect the
+// terminal background; that query's response was leaking back into the
+// textarea on terminals that don't immediately drain it. Hardcoded colors
+// remove the trigger entirely.
+//
+// These vars hold the *active* palette and are mutable: the settings
+// dialog calls SetPalette() to swap them, then DefaultStyles() rebuilds
+// every Style. Treat them as read-only outside SetPalette.
 var (
-	colPrimary   = lipgloss.Color("#6B50FF") // Charple — primary purple
-	colSecondary = lipgloss.Color("#FF60FF") // Dolly   — bright magenta (cursor)
-	colTertiary  = lipgloss.Color("#68FFD6") // Bok     — mint (focused prompt)
-	colAccent    = lipgloss.Color("#BD93F9") // legacy soft purple (kept for tool blocks)
-	colSuccess   = lipgloss.Color("#68FFD6") // mint (status idle reuses Bok)
-	colWarning   = lipgloss.Color("#FFB86C") // orange
-	colDanger    = lipgloss.Color("#FF5555") // red
-	colMuted     = lipgloss.Color("#858392") // Squid — grey
-	colText      = lipgloss.Color("#DFDBDD") // Ash   — off-white
-	colBorder    = lipgloss.Color("#44475A") // dark grey
-	colLogoTop   = lipgloss.Color("#FF60FF") // Dolly  (top of letters + top hatch)
-	colLogoBot   = lipgloss.Color("#6B50FF") // Charple (bottom of letters + bottom hatch)
-	colLogoVer   = lipgloss.Color("#68FFD6") // Bok cyan-ish for version label
+	colPrimary   color.Color
+	colSecondary color.Color
+	colTertiary  color.Color
+	colAccent    color.Color
+	colSuccess   color.Color
+	colWarning   color.Color
+	colDanger    color.Color
+	colMuted     color.Color
+	colText      color.Color
+	colBorder    color.Color
+	colLogoTop   color.Color
+	colLogoBot   color.Color
+	colLogoVer   color.Color
 )
+
+func init() {
+	SetPalette(Themes[0].P)
+}
+
+// SetPalette swaps the active palette. Call DefaultStyles() afterwards to
+// pick up the new colors in pre-built styles, and clear any markdown
+// caches that bake colors into rendered output.
+func SetPalette(p Palette) {
+	colPrimary = p.Primary
+	colSecondary = p.Secondary
+	colTertiary = p.Tertiary
+	colAccent = p.Accent
+	colSuccess = p.Success
+	colWarning = p.Warning
+	colDanger = p.Danger
+	colMuted = p.Muted
+	colText = p.Text
+	colBorder = p.Border
+	colLogoTop = p.LogoTop
+	colLogoBot = p.LogoBot
+	colLogoVer = p.LogoVer
+}
 
 type Styles struct {
 	HeaderLogo    lipgloss.Style

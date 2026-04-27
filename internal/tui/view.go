@@ -127,7 +127,7 @@ func (m Model) renderBody() string {
 		bodyH = 6
 	}
 	main := m.renderMain(bodyH)
-	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles)
+	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles, m.logoFrame)
 	// 3-col gap between sidebar and main — Crush-style breathing room, no
 	// vertical divider line.
 	gap := lipgloss.NewStyle().Width(sidebarGap).Height(bodyH).Render("")
@@ -145,12 +145,17 @@ func (m Model) renderMain(height int) string {
 		return lipgloss.NewStyle().Width(mainW).Height(height).Render(terminal.Render(p))
 	}
 
-	// Claude session mode: transcript + input + hint.
+	// Claude session mode: transcript + (gap) + input + hint. The blank
+	// rows between transcript and input give the assistant attribution
+	// breathing room. Layout reserves `inputTopGap` rows for it (see
+	// layout()), so we render the same number here via a string of N-1
+	// newlines (JoinVertical itself adds one between elements).
 	cur := m.manager.Current()
 	transcript := m.viewport.View()
 	input := m.renderInput(cur)
 	hint := m.renderInputHint()
-	body := lipgloss.JoinVertical(lipgloss.Left, transcript, input, hint)
+	gap := strings.Repeat("\n", inputTopGap-1)
+	body := lipgloss.JoinVertical(lipgloss.Left, transcript, gap, input, hint)
 	return lipgloss.NewStyle().Width(mainW).Height(height).Render(body)
 }
 

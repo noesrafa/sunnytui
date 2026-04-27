@@ -16,6 +16,7 @@ type KeyMap struct {
 	NewPane       key.Binding // open the new-terminal-pane dialog
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
 	SelectMode    key.Binding // ctrl+s — toggle mouse capture so user can select text natively
+	Settings      key.Binding // ctrl+, — open settings modal (theme picker)
 	ScrollUp      key.Binding
 	ScrollDn      key.Binding
 }
@@ -35,6 +36,7 @@ func DefaultKeyMap() KeyMap {
 		NewPane:       key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "new term")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),
 		SelectMode:    key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "select mode")),
+		Settings:      key.NewBinding(key.WithKeys("ctrl+,"), key.WithHelp("ctrl+,", "settings")),
 		ScrollUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
 		ScrollDn:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
 	}

@@ -98,6 +98,23 @@ func (a *Anim) SetLabel(s string) {
 	a.label = s
 }
 
+// SetColors swaps the gradient endpoints and label color. Lets the TUI
+// retheme the spinner without rebuilding the Anim (which would lose its
+// id and reset the morph state).
+func (a *Anim) SetColors(gradFrom, gradTo, label color.Color) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if gradFrom != nil {
+		a.gradFrom = gradFrom
+	}
+	if gradTo != nil {
+		a.gradTo = gradTo
+	}
+	if label != nil {
+		a.labelCol = label
+	}
+}
+
 // Step returns a tea.Cmd that fires StepMsg after one frame interval. Call
 // from Init() and re-call from Update() on each StepMsg to keep ticking.
 func (a *Anim) Step() tea.Cmd {

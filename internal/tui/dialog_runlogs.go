@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
@@ -22,6 +23,13 @@ func NewRunLogsDialog(r *runs.Run, s Styles) *RunLogsDialog {
 	vp := viewport.New()
 	vp.SetWidth(70)
 	vp.SetHeight(20)
+	// Same horizontal-scroll lockdown as the chat viewport — long log
+	// lines wrap to the dialog width instead of letting the user scroll
+	// sideways. Left/Right key bindings disabled so they don't conflict
+	// with future cursor moves inside the logs viewer.
+	vp.SoftWrap = true
+	vp.KeyMap.Left = key.NewBinding(key.WithDisabled())
+	vp.KeyMap.Right = key.NewBinding(key.WithDisabled())
 	return &RunLogsDialog{run: r, vp: vp, follow: true, styles: s}
 }
 

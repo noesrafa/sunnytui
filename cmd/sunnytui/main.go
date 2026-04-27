@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,9 +23,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(2)
+	// Default subcommand: chat. Lets the binary be invoked as `sunny` (or
+	// `sunnytui`) with no args, with `--cwd`, `--model`, `--effort`, etc.
+	if len(os.Args) < 2 || strings.HasPrefix(os.Args[1], "-") {
+		if err := runChat(os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	switch os.Args[1] {
 	case "chat":
@@ -35,6 +41,11 @@ func main() {
 	case "statusline":
 		if err := runStatusline(); err != nil {
 			fmt.Fprintln(os.Stderr, "statusline error:", err)
+			os.Exit(1)
+		}
+	case "statusline-wrap":
+		if err := runStatuslineWrap(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "statusline-wrap error:", err)
 			os.Exit(1)
 		}
 	case "statusline-install":
@@ -77,6 +88,8 @@ Commands:
   stream-test <p1> <p2>...  M2 backend: send N prompts on one streaming session
   statusline                act as Claude Code's statusline (reads stdin JSON,
                             persists usage snapshot for the chat sidebar)
+  statusline-wrap CMD...    persist snapshot, then forward stdin/stdout to CMD
+                            (use to coexist with claude-hud or another tool)
   statusline-install        print instructions to register sunnytui as the
                             Claude Code statusline command
   help                      show this message`)
@@ -115,6 +128,31 @@ func runStatusline() error {
 	return nil
 }
 
+// runStatuslineWrap forwards stdin to another statusline command (e.g.
+// claude-hud) while persisting our snapshot in passing. Lets sunnytui's
+// usage widget coexist with whatever the user already has installed:
+//
+//	"statusLine": { "type": "command", "command": "sunnytui statusline-wrap bash -c '<inner>'" }
+func runStatuslineWrap(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("statusline-wrap: missing inner command")
+	}
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	if len(raw) > 0 {
+		if werr := usage.Write(raw); werr != nil {
+			fmt.Fprintln(os.Stderr, "warn: persist snapshot:", werr)
+		}
+	}
+	inner := exec.Command(args[0], args[1:]...)
+	inner.Stdin = strings.NewReader(string(raw))
+	inner.Stdout = os.Stdout
+	inner.Stderr = os.Stderr
+	return inner.Run()
+}
+
 func installStatusline() error {
 	exe, err := exec.LookPath("sunnytui")
 	if err != nil {
@@ -133,7 +171,16 @@ will refresh its statusline and our subcommand will write the snapshot to:
   %s
 
 After that, sunnytui chat's "usage" widget will show the percentages.
-`, exe, usage.SnapshotPath())
+
+ALREADY USING CLAUDE-HUD (or another statusline)?  Wrap it instead so both
+work — we persist the snapshot in passing and forward stdin to the inner
+command:
+
+  "statusLine": {
+    "type": "command",
+    "command": "%s statusline-wrap <YOUR EXISTING COMMAND>"
+  }
+`, exe, usage.SnapshotPath(), exe)
 	return nil
 }
 
@@ -164,6 +211,21 @@ func runChat(args []string) error {
 		cwd, _ = os.Getwd()
 	}
 
+	// Single-instance lock — two sunny processes can't safely share
+	// ~/.sunnytui/state.json (last writer wins, history is lost). The
+	// second invocation prints a helpful message and exits.
+	lock, lerr := state.Acquire()
+	if lerr != nil {
+		if errors.Is(lerr, state.ErrAlreadyRunning) {
+			fmt.Fprintln(os.Stderr, lerr)
+			fmt.Fprintln(os.Stderr, "Move that window over, or close it first.")
+			fmt.Fprintln(os.Stderr, "Lock file:", state.LockPath())
+			os.Exit(1)
+		}
+		return fmt.Errorf("acquire lock: %w", lerr)
+	}
+	defer lock.Release()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -181,6 +243,10 @@ func runChat(args []string) error {
 	}
 
 	for _, ss := range saved.Sessions {
+		items, ierr := session.UnmarshalItems(ss.Items)
+		if ierr != nil {
+			lg.Warn("restore items decode failed", "cwd", ss.Cwd, "err", ierr)
+		}
 		s, sErr := session.New(ctx, ss.Cwd, session.Options{
 			Logger:                   lg,
 			Model:                    cmp.Or(ss.Model, model),
@@ -189,6 +255,9 @@ func runChat(args []string) error {
 			ResumeID:                 ss.RemoteID,
 			Title:                    ss.Title,
 			Draft:                    ss.Draft,
+			Items:                    items,
+			TotalCost:                ss.TotalCost,
+			Turns:                    ss.Turns,
 		})
 		if sErr != nil {
 			lg.Warn("restore session failed", "cwd", ss.Cwd, "err", sErr)
@@ -254,6 +323,7 @@ func runChat(args []string) error {
 		Runs:                     runMgr,
 		Panes:                    paneMgr,
 		InitialActiveKind:        saved.ActiveKind,
+		InitialTheme:             saved.Theme,
 	})
 	return root.Run(ctx)
 }

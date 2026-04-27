@@ -19,20 +19,20 @@ const (
 	sidebarGap   = 3 // empty cols between sidebar and main column
 )
 
-func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles) string {
+func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles, logoFrame int) string {
 	innerW := sidebarWidth - 4 // padding(0,1) + 1 col safety on each side
 
-	rows := []string{renderLogo(innerW, s), ""}
+	rows := []string{renderLogo(innerW, s, logoFrame), ""}
 	rows = append(rows, renderSessionsSection(mgr, activePaneActive, innerW, s)...)
 	if section := renderTermsSection(paneMgr, activePaneActive, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
 	}
-	if section := renderUsageSection(mgr, innerW, s); len(section) > 0 {
+	if section := renderRunsSection(runMgr, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
 	}
-	if section := renderRunsSection(runMgr, innerW, s); len(section) > 0 {
+	if section := renderUsageSection(mgr, innerW, s); len(section) > 0 {
 		rows = append(rows, "")
 		rows = append(rows, section...)
 	}
@@ -119,6 +119,7 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 		s.StatusKey.Render("ctrl+u") + s.Hint.Render(" runs"),
 		s.StatusKey.Render("ctrl+k") + s.Hint.Render(" switch"),
 		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" select"),
+		s.StatusKey.Render("ctrl+,") + s.Hint.Render(" settings"),
 		s.StatusKey.Render("tab") + s.Hint.Render("    next"),
 		s.StatusKey.Render("ctrl+w") + s.Hint.Render(" close"),
 		s.StatusKey.Render("esc") + s.Hint.Render("    quit"),
@@ -171,38 +172,103 @@ func renderSidebarRow(sess *session.Session, active bool, s Styles) []string {
 
 // buildUsageWidget tries the rich percentage view first (statusline snapshot)
 // and falls back to a status-only line from the in-stream rate_limit_event.
+// Mirrors claude-hud's display: context window % + 5h + 7d rate-limit windows.
+//
+// Freshness window: 24h. We deliberately keep stale snapshots visible
+// instead of disappearing the bars whenever the user steps away from
+// claude-hud — Claude Code only refreshes the statusline payload on
+// activity, so a 10-minute cutoff hides the widget for the rest of the
+// day after a single break.
 func buildUsageWidget(mgr *session.Manager, innerW int, s Styles) []string {
-	if payload, _, err := usage.Read(10 * time.Minute); err == nil && payload != nil && payload.RateLimits != nil {
+	if payload, _, err := usage.Read(24 * time.Hour); err == nil && payload != nil {
 		var rows []string
-		if w := payload.RateLimits.FiveHour; w != nil {
-			rows = append(rows, renderUsageBar("5h", w, innerW, s)...)
+		if cw := payload.ContextWindow; cw != nil && cw.UsedPercentage > 0 {
+			rows = append(rows, renderProgressBar("ctx", cw.UsedPercentage, "", innerW, s))
 		}
-		if w := payload.RateLimits.SevenDay; w != nil {
-			if len(rows) > 0 {
-				rows = append(rows, "")
+		if rl := payload.RateLimits; rl != nil {
+			if w := rl.FiveHour; w != nil {
+				rows = append(rows, renderProgressBar("5h", w.UsedPercentage, resetHint(w.ResetsAt), innerW, s))
 			}
-			rows = append(rows, renderUsageBar("7d", w, innerW, s)...)
+			if w := rl.SevenDay; w != nil {
+				rows = append(rows, renderProgressBar("7d", w.UsedPercentage, resetHint(w.ResetsAt), innerW, s))
+			}
 		}
 		if len(rows) > 0 {
 			return rows
 		}
 	}
 	if cur := mgr.Current(); cur != nil && cur.RateLimit != nil {
-		return renderUsage(cur.RateLimit, s)
+		return renderRateLimitFallback(cur.RateLimit, innerW, s)
 	}
 	return nil
 }
 
-// renderUsageBar paints a claude-hud-style row:
+// renderRateLimitFallback paints the in-stream rate_limit_event in the
+// same compact one-line style as the snapshot bars. We don't have a
+// percentage in this path, so the bar is replaced by a status pill +
+// reset hint:
 //
-//	5h ███░░░░░ 25%
-//	   resets in 1h 30m
-func renderUsageBar(label string, w *usage.Window, innerW int, s Styles) []string {
-	pct := w.UsedPercentage
-	barW := innerW - len(label) - 6 // " " + bar + " NN%"
-	if barW < 6 {
-		barW = 6
+//	5h ● ok · 55m
+//	7d ● ok · 156h
+func renderRateLimitFallback(rl *claude.RateLimitInfo, innerW int, s Styles) []string {
+	label := "5h"
+	switch rl.RateLimitType {
+	case "weekly":
+		label = "7d"
+	case "five_hour", "":
+		label = "5h"
 	}
+	dot := s.StatusIdle.Render("●")
+	statusText := "ok"
+	if rl.Status != "" && rl.Status != "allowed" {
+		dot = s.StatusBusy.Render("●")
+		statusText = rl.Status
+	}
+	parts := []string{
+		s.HeaderDim.Render(fmt.Sprintf("%-3s", label)),
+		dot,
+		s.HeaderDim.Render(statusText),
+	}
+	if rs := resetHint(rl.ResetsAt); rs != "" {
+		parts = append(parts, s.Hint.Render("· "+rs))
+	}
+	rows := []string{strings.Join(parts, " ")}
+	if rl.IsUsingOverage {
+		rows = append(rows, "    "+s.StatusBusy.Render("⚠ overage"))
+	}
+	_ = innerW // reserved for future bar-fitting; not used in fallback today
+	return rows
+}
+
+// renderProgressBar is the canonical thin one-liner used by every usage
+// metric. Layout:
+//
+//	ctx ━━━━━──────── 15%
+//	5h  ━━━━────────  9% 3h54m
+//	7d  ─────────────  1% 156h
+//
+// The filled portion uses a Blend1D ramp from `colTertiary` (mint, healthy)
+// to `colDanger` (red, near-cap), so the warmer colors only appear as the
+// bar fills towards the right — visually communicates risk without needing
+// per-percentage thresholds.
+func renderProgressBar(label string, pct int, reset string, innerW int, s Styles) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	pctStr := fmt.Sprintf("%3d%%", pct)
+	paddedLabel := fmt.Sprintf("%-3s", label)
+
+	barW := innerW - lipgloss.Width(paddedLabel) - 1 - 1 - lipgloss.Width(pctStr)
+	if reset != "" {
+		barW -= 1 + lipgloss.Width(reset)
+	}
+	if barW < 4 {
+		barW = 4
+	}
+
 	filled := pct * barW / 100
 	if filled < 0 {
 		filled = 0
@@ -210,76 +276,54 @@ func renderUsageBar(label string, w *usage.Window, innerW int, s Styles) []strin
 	if filled > barW {
 		filled = barW
 	}
-	bar := strings.Repeat("█", filled) + strings.Repeat("░", barW-filled)
 
-	barStyle := s.StatusIdle
-	switch {
-	case pct >= 90:
-		barStyle = s.ResultError
-	case pct >= 70:
-		barStyle = s.StatusBusy
-	}
-	header := s.HeaderDim.Render(label) + " " + barStyle.Render(bar) + " " +
-		barStyle.Render(fmt.Sprintf("%d%%", pct))
-
-	rows := []string{header}
-	if w.ResetsAt > 0 {
-		d := time.Until(time.Unix(w.ResetsAt, 0))
-		if d < 0 {
-			rows = append(rows, "   "+s.Hint.Render("resetting…"))
-		} else {
-			rows = append(rows, "   "+s.Hint.Render("resets in "+shortDuration(d)))
+	var bar strings.Builder
+	if barW > 0 {
+		ramp := lipgloss.Blend1D(barW, colTertiary, colDanger)
+		emptyStyle := lipgloss.NewStyle().Foreground(colBorder)
+		for i := 0; i < barW; i++ {
+			if i < filled {
+				bar.WriteString(lipgloss.NewStyle().Foreground(ramp[i]).Render("━"))
+			} else {
+				bar.WriteString(emptyStyle.Render("─"))
+			}
 		}
 	}
-	return rows
+
+	line := s.HeaderDim.Render(paddedLabel) + " " + bar.String() + " " + s.HeaderDim.Render(pctStr)
+	if reset != "" {
+		line += " " + s.Hint.Render(reset)
+	}
+	return line
 }
 
-func renderUsage(rl *claude.RateLimitInfo, s Styles) []string {
-	label := rl.RateLimitType
-	switch label {
-	case "five_hour":
-		label = "5h window"
-	case "weekly":
-		label = "7d window"
-	case "":
-		label = "rate limit"
+// resetHint formats an absolute reset timestamp into a compact relative
+// duration ("3h54m", "12m"), or "" when the timestamp is missing / past.
+func resetHint(resetsAt int64) string {
+	if resetsAt <= 0 {
+		return ""
 	}
-
-	statusStyle := s.StatusIdle
-	statusText := "ok"
-	if rl.Status != "" && rl.Status != "allowed" {
-		statusStyle = s.StatusBusy
-		statusText = rl.Status
+	d := time.Until(time.Unix(resetsAt, 0))
+	if d <= 0 {
+		return ""
 	}
-	line1 := s.AssistantText.Render(label) + " " + statusStyle.Render("●"+" "+statusText)
-
-	var line2 string
-	if rl.ResetsAt > 0 {
-		d := time.Until(time.Unix(rl.ResetsAt, 0))
-		if d < 0 {
-			line2 = s.Hint.Render("resetting…")
-		} else {
-			line2 = s.Hint.Render("resets in " + shortDuration(d))
-		}
-	}
-
-	rows := []string{line1}
-	if line2 != "" {
-		rows = append(rows, line2)
-	}
-	if rl.IsUsingOverage {
-		rows = append(rows, s.StatusBusy.Render("⚠ on overage"))
-	}
-	return rows
+	return shortDuration(d)
 }
 
 func shortDuration(d time.Duration) string {
-	if d > time.Hour {
+	if d >= 24*time.Hour {
+		// Long resets (7d window) — collapse to whole hours, no minutes.
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	if d >= time.Hour {
 		hours := int(d.Hours())
 		mins := int(d.Minutes()) - hours*60
-		return fmt.Sprintf("%dh %dm", hours, mins)
+		if mins == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh%dm", hours, mins)
 	}
-	if d > time.Minute {
+	if d >= time.Minute {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%ds", int(d.Seconds()))
