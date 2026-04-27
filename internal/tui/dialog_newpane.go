@@ -12,11 +12,14 @@ import (
 	"github.com/noesrafa/sunnytui/internal/favs"
 )
 
+const (
+	paneFieldName = iota
+	paneFieldCommand
+	paneFieldCwd
+)
+
 type NewPaneDialog struct {
-	nameIn    textinput.Model
-	cmdIn     textinput.Model
-	cwdIn     textinput.Model
-	focus     int // 0 name, 1 cmd, 2 cwd
+	form      formInputs
 	styles    Styles
 	err       string
 	saved     string // ephemeral "saved as fav" message
@@ -24,28 +27,20 @@ type NewPaneDialog struct {
 }
 
 func NewNewPaneDialog(defaultCwd string, s Styles) *NewPaneDialog {
-	mk := func(placeholder, value string) textinput.Model {
-		ti := textinput.New()
-		ti.Placeholder = placeholder
-		ti.Prompt = "› "
-		ti.SetValue(value)
-		ti.SetWidth(60)
-		return ti
-	}
 	defaultName := "shell"
 	if defaultCwd != "" {
 		defaultName = filepath.Base(defaultCwd)
 	}
-	favs, _ := favs.Load()
-	d := &NewPaneDialog{
-		nameIn:    mk(defaultName, defaultName),
-		cmdIn:     mk("(blank → "+defaultShell()+")", ""),
-		cwdIn:     mk(defaultCwd, defaultCwd),
+	favorites, _ := favs.Load()
+	return &NewPaneDialog{
+		form: newFormInputs([]inputSpec{
+			{Placeholder: defaultName, Value: defaultName},
+			{Placeholder: "(blank → " + defaultShell() + ")"},
+			{Placeholder: defaultCwd, Value: defaultCwd},
+		}),
 		styles:    s,
-		favorites: favs,
+		favorites: favorites,
 	}
-	d.nameIn.Focus()
-	return d
 }
 
 func (d *NewPaneDialog) Init() tea.Cmd { return textinput.Blink }
@@ -57,13 +52,7 @@ func (d *NewPaneDialog) Update(msg tea.Msg) tea.Cmd {
 		if len(s) == 1 && s >= "1" && s <= "9" {
 			idx := int(s[0] - '1')
 			if idx < len(d.favorites) {
-				f := d.favorites[idx]
-				d.nameIn.SetValue(f.Name)
-				d.cmdIn.SetValue(f.Command)
-				if f.Cwd != "" {
-					d.cwdIn.SetValue(f.Cwd)
-				}
-				d.saved = ""
+				d.applyFavorite(d.favorites[idx])
 				return nil
 			}
 		}
@@ -71,63 +60,51 @@ func (d *NewPaneDialog) Update(msg tea.Msg) tea.Cmd {
 		case "esc":
 			return func() tea.Msg { return CloseDialogMsg{} }
 		case "tab":
-			d.advance(1)
+			d.form.advance(1)
 			return nil
 		case "shift+tab":
-			d.advance(-1)
+			d.form.advance(-1)
 			return nil
 		case "ctrl+f":
-			// Save current values as a new favorite.
-			name := strings.TrimSpace(d.nameIn.Value())
-			cmd := strings.TrimSpace(d.cmdIn.Value())
-			if name == "" || cmd == "" {
-				d.err = "fill name+command before saving fav"
-				return nil
-			}
-			updated, err := favs.Add(name, cmd, strings.TrimSpace(d.cwdIn.Value()))
-			if err != nil {
-				d.err = err.Error()
-				return nil
-			}
-			d.favorites = updated
-			d.saved = "★ saved as " + name
-			d.err = ""
+			d.saveFavorite()
 			return nil
 		case "enter":
 			return d.submit()
 		}
 	}
-	var cmd tea.Cmd
-	switch d.focus {
-	case 0:
-		d.nameIn, cmd = d.nameIn.Update(msg)
-	case 1:
-		d.cmdIn, cmd = d.cmdIn.Update(msg)
-	case 2:
-		d.cwdIn, cmd = d.cwdIn.Update(msg)
-	}
-	return cmd
+	return d.form.updateActive(msg)
 }
 
-func (d *NewPaneDialog) advance(by int) {
-	d.nameIn.Blur()
-	d.cmdIn.Blur()
-	d.cwdIn.Blur()
-	d.focus = (d.focus + by + 3) % 3
-	switch d.focus {
-	case 0:
-		d.nameIn.Focus()
-	case 1:
-		d.cmdIn.Focus()
-	case 2:
-		d.cwdIn.Focus()
+func (d *NewPaneDialog) applyFavorite(f favs.Favorite) {
+	d.form.inputs[paneFieldName].SetValue(f.Name)
+	d.form.inputs[paneFieldCommand].SetValue(f.Command)
+	if f.Cwd != "" {
+		d.form.inputs[paneFieldCwd].SetValue(f.Cwd)
 	}
+	d.saved = ""
+}
+
+func (d *NewPaneDialog) saveFavorite() {
+	name := strings.TrimSpace(d.form.value(paneFieldName))
+	cmd := strings.TrimSpace(d.form.value(paneFieldCommand))
+	if name == "" || cmd == "" {
+		d.err = "fill name+command before saving fav"
+		return
+	}
+	updated, err := favs.Add(name, cmd, strings.TrimSpace(d.form.value(paneFieldCwd)))
+	if err != nil {
+		d.err = err.Error()
+		return
+	}
+	d.favorites = updated
+	d.saved = "★ saved as " + name
+	d.err = ""
 }
 
 func (d *NewPaneDialog) submit() tea.Cmd {
-	name := strings.TrimSpace(d.nameIn.Value())
-	command := strings.TrimSpace(d.cmdIn.Value())
-	cwd := strings.TrimSpace(d.cwdIn.Value())
+	name := strings.TrimSpace(d.form.value(paneFieldName))
+	command := strings.TrimSpace(d.form.value(paneFieldCommand))
+	cwd := strings.TrimSpace(d.form.value(paneFieldCwd))
 	if name == "" {
 		name = "shell"
 	}
@@ -157,19 +134,7 @@ func (d *NewPaneDialog) View(width, height int) string {
 	innerW := boxW - 6
 	title := HatchedTitle("New Terminal", innerW, colPrimary, colSecondary, d.styles.DialogTitle)
 
-	d.nameIn.SetWidth(innerW - 4)
-	d.cmdIn.SetWidth(innerW - 4)
-	d.cwdIn.SetWidth(innerW - 4)
-
-	field := func(label string, focused bool, view string) []string {
-		head := d.styles.HeaderDim.Render(label)
-		if focused {
-			head = d.styles.UserPrompt.Render("▸ ") + d.styles.HeaderTitle.Render(label)
-		} else {
-			head = "  " + head
-		}
-		return []string{head, "  " + view}
-	}
+	d.form.setWidth(innerW - 4)
 
 	lines := []string{title, ""}
 
@@ -191,11 +156,11 @@ func (d *NewPaneDialog) View(width, height int) string {
 			"")
 	}
 
-	lines = append(lines, field("name", d.focus == 0, d.nameIn.View())...)
+	lines = append(lines, formFieldView("name", d.form.focus == paneFieldName, d.form.view(paneFieldName), d.styles)...)
 	lines = append(lines, "")
-	lines = append(lines, field("command", d.focus == 1, d.cmdIn.View())...)
+	lines = append(lines, formFieldView("command", d.form.focus == paneFieldCommand, d.form.view(paneFieldCommand), d.styles)...)
 	lines = append(lines, "")
-	lines = append(lines, field("cwd", d.focus == 2, d.cwdIn.View())...)
+	lines = append(lines, formFieldView("cwd", d.form.focus == paneFieldCwd, d.form.view(paneFieldCwd), d.styles)...)
 
 	if d.saved != "" {
 		lines = append(lines, "", d.styles.StatusIdle.Render(d.saved))

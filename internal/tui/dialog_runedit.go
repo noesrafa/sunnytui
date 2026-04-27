@@ -10,31 +10,24 @@ import (
 
 // RunEditDialog is the "new run" form (no edit-existing yet — delete + new).
 type RunEditDialog struct {
-	nameIn  textinput.Model
-	cmdIn   textinput.Model
-	cwdIn   textinput.Model
-	focus   int // 0 name, 1 command, 2 cwd
-	styles  Styles
-	err     string
+	form   formInputs
+	styles Styles
+	err    string
 }
 
+const (
+	runFieldName = iota
+	runFieldCommand
+	runFieldCwd
+)
+
 func NewRunEditDialog(defaultCwd string, s Styles) *RunEditDialog {
-	mk := func(placeholder, value string) textinput.Model {
-		ti := textinput.New()
-		ti.Placeholder = placeholder
-		ti.Prompt = "› "
-		ti.SetValue(value)
-		ti.SetWidth(60)
-		return ti
-	}
-	d := &RunEditDialog{
-		nameIn: mk("e.g. web", ""),
-		cmdIn:  mk("e.g. bun run dev", ""),
-		cwdIn:  mk(defaultCwd, ""),
-		styles: s,
-	}
-	d.nameIn.Focus()
-	return d
+	form := newFormInputs([]inputSpec{
+		{Placeholder: "e.g. web"},
+		{Placeholder: "e.g. bun run dev"},
+		{Placeholder: defaultCwd},
+	})
+	return &RunEditDialog{form: form, styles: s}
 }
 
 func (d *RunEditDialog) Init() tea.Cmd { return textinput.Blink }
@@ -45,46 +38,22 @@ func (d *RunEditDialog) Update(msg tea.Msg) tea.Cmd {
 		case "esc":
 			return func() tea.Msg { return CloseDialogMsg{} }
 		case "tab":
-			d.advance(1)
+			d.form.advance(1)
 			return nil
 		case "shift+tab":
-			d.advance(-1)
+			d.form.advance(-1)
 			return nil
 		case "enter":
 			return d.submit()
 		}
 	}
-	var cmd tea.Cmd
-	switch d.focus {
-	case 0:
-		d.nameIn, cmd = d.nameIn.Update(msg)
-	case 1:
-		d.cmdIn, cmd = d.cmdIn.Update(msg)
-	case 2:
-		d.cwdIn, cmd = d.cwdIn.Update(msg)
-	}
-	return cmd
-}
-
-func (d *RunEditDialog) advance(by int) {
-	d.nameIn.Blur()
-	d.cmdIn.Blur()
-	d.cwdIn.Blur()
-	d.focus = (d.focus + by + 3) % 3
-	switch d.focus {
-	case 0:
-		d.nameIn.Focus()
-	case 1:
-		d.cmdIn.Focus()
-	case 2:
-		d.cwdIn.Focus()
-	}
+	return d.form.updateActive(msg)
 }
 
 func (d *RunEditDialog) submit() tea.Cmd {
-	name := strings.TrimSpace(d.nameIn.Value())
-	cmd := strings.TrimSpace(d.cmdIn.Value())
-	cwd := strings.TrimSpace(d.cwdIn.Value())
+	name := strings.TrimSpace(d.form.value(runFieldName))
+	cmd := strings.TrimSpace(d.form.value(runFieldCommand))
+	cwd := strings.TrimSpace(d.form.value(runFieldCwd))
 	if name == "" {
 		d.err = "name requerido"
 		return nil
@@ -115,28 +84,16 @@ func (d *RunEditDialog) View(width, height int) string {
 	}
 	innerW := boxW - 6
 
+	d.form.setWidth(innerW - 4)
+
 	title := HatchedTitle("New Run", innerW, colPrimary, colAccent, d.styles.DialogTitle)
 
-	d.nameIn.SetWidth(innerW - 4)
-	d.cmdIn.SetWidth(innerW - 4)
-	d.cwdIn.SetWidth(innerW - 4)
-
-	field := func(label string, focused bool, view string) []string {
-		head := d.styles.HeaderDim.Render(label)
-		if focused {
-			head = d.styles.UserPrompt.Render("▸ ") + d.styles.HeaderTitle.Render(label)
-		} else {
-			head = "  " + head
-		}
-		return []string{head, "  " + view}
-	}
-
 	lines := []string{title, ""}
-	lines = append(lines, field("name", d.focus == 0, d.nameIn.View())...)
+	lines = append(lines, formFieldView("name", d.form.focus == runFieldName, d.form.view(runFieldName), d.styles)...)
 	lines = append(lines, "")
-	lines = append(lines, field("command", d.focus == 1, d.cmdIn.View())...)
+	lines = append(lines, formFieldView("command", d.form.focus == runFieldCommand, d.form.view(runFieldCommand), d.styles)...)
 	lines = append(lines, "")
-	lines = append(lines, field("cwd (optional)", d.focus == 2, d.cwdIn.View())...)
+	lines = append(lines, formFieldView("cwd (optional)", d.form.focus == runFieldCwd, d.form.view(runFieldCwd), d.styles)...)
 	if d.err != "" {
 		lines = append(lines, "", d.styles.ResultError.Render("✗ "+d.err))
 	}
