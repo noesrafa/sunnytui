@@ -256,13 +256,14 @@ func (m Model) Init() tea.Cmd {
 
 func waitForSession(sess *session.Session) tea.Cmd {
 	id := sess.ID
-	events := sess.Stream.Events()
+	stream := sess.Stream
+	events := stream.Events()
 	return func() tea.Msg {
 		ev, ok := <-events
 		if !ok {
-			return sessionClosedMsg{SessionID: id}
+			return sessionClosedMsg{SessionID: id, Stream: stream}
 		}
-		return sessionEventMsg{SessionID: id, Event: ev}
+		return sessionEventMsg{SessionID: id, Stream: stream, Event: ev}
 	}
 }
 
@@ -585,6 +586,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sessionEventMsg:
 		cmds = append(cmds, m.handleSessionEvent(msg))
 	case sessionClosedMsg:
+		// Drop close events from streams the session has already swapped out
+		// (e.g. after Ctrl+R reset the claude process). Otherwise the old
+		// goroutine would fire sessionClosedMsg when its channel drains and
+		// we'd incorrectly tear down the freshly-restarted session.
+		if sess := m.manager.ByID(msg.SessionID); sess == nil || (msg.Stream != nil && sess.Stream != msg.Stream) {
+			break
+		}
 		m.manager.Close(msg.SessionID)
 		m.refreshViewport()
 	case spinner.TickMsg:
@@ -643,6 +651,27 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	case ConfirmQuitMsg:
 		return m, tea.Quit, true
+	case ConfirmCloseSessionMsg:
+		m.overlay.CloseTop()
+		m.handleCloseTab()
+		return m, nil, true
+	case ConfirmNewConvMsg:
+		m.overlay.CloseTop()
+		cur := m.manager.Current()
+		if cur == nil {
+			return m, nil, true
+		}
+		if err := cur.Reset(m.ctx, m.skipPerms); err != nil {
+			cur.LastErr = err
+			m.logger.Error("session reset failed", "session", cur.ID, "err", err)
+			return m, nil, true
+		}
+		m.textarea.Reset()
+		m.layout()
+		m.refreshViewport()
+		m.viewport.GotoBottom()
+		m.saveState()
+		return m, waitForSession(cur), true
 	case OpenRunEditMsg:
 		cwd := m.initialCwd
 		if cur := m.manager.Current(); cur != nil {
@@ -859,10 +888,14 @@ func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if mm.Mod.Contains(tea.ModShift) {
 			return m, nil, true
 		}
-		var cmd tea.Cmd
-		if !m.overlay.HasOpen() {
-			m.viewport, cmd = m.viewport.Update(mm)
+		// When a dialog is open, hand the wheel to it so dialogs that own
+		// scrollable content (the diff viewer) can scroll. The chat
+		// viewport stays parked.
+		if m.overlay.HasOpen() {
+			return m, m.overlay.UpdateTop(mm), true
 		}
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(mm)
 		return m, cmd, true
 	}
 	if mm, ok := msg.(tea.MouseMsg); ok {
@@ -925,8 +958,22 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.CloseSession):
 		// Handled here (above the pane-forward block) so ctrl+w closes
 		// the active terminal pane instead of getting eaten by the shell
-		// inside it as a "delete word" keystroke.
-		m.handleCloseTab()
+		// inside it as a "delete word" keystroke. Panes close immediately;
+		// claude sessions go through a confirmation dialog so the user
+		// doesn't lose the transcript on a typo.
+		if m.activeKind == activePane {
+			m.handleCloseTab()
+			return m, nil, true
+		}
+		if cur := m.manager.Current(); cur != nil {
+			body := []string{"¿Cerrar la sesión \"" + cur.Title + "\"?"}
+			if cur.State == session.StateThinking {
+				body = append(body, "")
+				body = append(body, "⚠ la sesión está pensando — el turno se cancelará")
+			}
+			d := NewConfirmDialog(m.styles, "Cerrar sesión", body, ConfirmCloseSessionMsg{})
+			return m, m.overlay.Open(d), true
+		}
 		return m, nil, true
 	}
 
@@ -949,9 +996,25 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	case key.Matches(msg, m.keymap.ClearOrCancel):
 		m.handleClearOrCancel()
 		return m, nil, true
-	case key.Matches(msg, m.keymap.Rename):
+	case key.Matches(msg, m.keymap.Diff):
+		cwd, branch := "", ""
+		var changes session.ChangeStats
 		if cur := m.manager.Current(); cur != nil {
-			return m, m.overlay.Open(NewRenameDialog(cur.Title, m.styles)), true
+			cwd, branch, changes = cur.Cwd, cur.Branch, cur.Changes
+		} else {
+			cwd = m.initialCwd
+		}
+		return m, m.overlay.Open(NewDiffDialog(cwd, branch, changes, m.styles)), true
+	case key.Matches(msg, m.keymap.NewConv):
+		if cur := m.manager.Current(); cur != nil {
+			body := []string{
+				"¿Empezar una nueva conversación de claude?",
+				"",
+				"Se mantendrá la pestaña (" + cur.Title + ") en " + prettyPath(cur.Cwd) + ",",
+				"pero el transcript actual se va a descartar.",
+			}
+			d := NewConfirmDialog(m.styles, "Nueva conversación", body, ConfirmNewConvMsg{})
+			return m, m.overlay.Open(d), true
 		}
 		return m, nil, true
 	case key.Matches(msg, m.keymap.Send):
@@ -1163,6 +1226,11 @@ func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
 	if sess == nil {
 		return nil
 	}
+	// Drop events from streams the session has already swapped out (Ctrl+R
+	// reset). The new stream's waitForSession will keep the chain alive.
+	if msg.Stream != nil && sess.Stream != msg.Stream {
+		return nil
+	}
 	wasThinking := sess.State == session.StateThinking
 	sess.HandleEvent(msg.Event)
 	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
@@ -1349,7 +1417,8 @@ func (m *Model) welcomeText() string {
 		s.AssistantText.Render("escribe un mensaje para empezar a chatear con claude code"),
 		"",
 		row("ctrl+n", "añade una sesión en otro directorio"),
-		row("ctrl+r", "renombra la sesión activa"),
+		row("ctrl+r", "nueva conversación en la sesión actual"),
+		row("ctrl+d", "ver el diff del repo"),
 		row("tab   ", "cambia entre sesiones"),
 		row("ctrl+w", "cierra la sesión actual"),
 		row("ctrl+c", "limpia el input (×2 cancela el turno)"),
@@ -1475,11 +1544,15 @@ func (m Model) saveState() {
 			m.logger.Warn("marshal items", "session", s.ID, "err", mErr)
 			raw = nil
 		}
+		eff := s.Effort
+		if eff == "" {
+			eff = m.defaultEffort
+		}
 		sessions = append(sessions, state.SavedSession{
 			Title:     s.Title,
 			Cwd:       s.Cwd,
 			Model:     s.Model,
-			Effort:    m.defaultEffort,
+			Effort:    eff,
 			Draft:     s.Draft,
 			RemoteID:  s.RemoteID,
 			Items:     raw,

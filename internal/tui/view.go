@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"path/filepath"
 	"strings"
 
@@ -162,6 +163,11 @@ func (m Model) renderInput(cur *session.Session) string {
 
 // renderInputHint is the row under the input. Crush-style: shows the active
 // session's cwd · model · branch (shortcuts already live in the sidebar).
+//
+// The model + effort segment is painted with a pink → purple gradient (same
+// vibe as the morphing "thinking" spinner) so the user can spot the active
+// effort level at a glance. Branch gets a "●" indicator when the working
+// tree has uncommitted/untracked changes pending.
 func (m Model) renderInputHint() string {
 	s := m.styles
 	cur := m.manager.Current()
@@ -171,10 +177,18 @@ func (m Model) renderInputHint() string {
 	var parts []string
 	parts = append(parts, s.HeaderDim.Render(prettyPath(cur.Cwd)))
 	if cur.Model != "" {
-		parts = append(parts, s.HeaderDim.Render(cur.Model))
+		text := cur.Model
+		if cur.Effort != "" {
+			text = cur.Model + " " + cur.Effort
+		}
+		parts = append(parts, applyForegroundGradient(text, colSecondary, colPrimary))
 	}
 	if cur.Branch != "" {
-		parts = append(parts, s.HeaderDim.Render("⌥ "+cur.Branch))
+		branch := s.HeaderDim.Render("⌥ " + cur.Branch)
+		if badge := renderChangesBadge(cur.Changes); badge != "" {
+			branch += " " + badge
+		}
+		parts = append(parts, branch)
 	}
 	sep := s.HeaderSep.Render(" · ")
 	return " " + strings.Join(parts, sep)
@@ -198,6 +212,43 @@ func (m Model) renderStatus() string {
 		gap = 1
 	}
 	return left + strings.Repeat(" ", gap) + right
+}
+
+// renderChangesBadge paints the per-bucket file counts of pending git changes
+// as a compact, colored pill: green +N (added), pink ~N (modified), red −N
+// (deleted), accent ?N (untracked). Empty buckets are omitted; an empty
+// badge means a clean tree.
+//
+// Visual goal: at a glance the user can tell whether they have unstaged
+// edits, brand-new files, or deletions still pending — without having to
+// drop into the diff dialog.
+func renderChangesBadge(c session.ChangeStats) string {
+	if !c.Dirty() {
+		return ""
+	}
+	type seg struct {
+		count int
+		sym   string
+		col   color.Color
+	}
+	segs := []seg{
+		{c.Added, "+", colSuccess},
+		{c.Modified, "~", colSecondary},
+		{c.Deleted, "−", colDanger},
+		{c.Untracked, "?", colAccent},
+	}
+	var parts []string
+	for _, s := range segs {
+		if s.count == 0 {
+			continue
+		}
+		parts = append(parts,
+			lipgloss.NewStyle().Foreground(s.col).Bold(true).Render(
+				fmt.Sprintf("%s%d", s.sym, s.count),
+			),
+		)
+	}
+	return strings.Join(parts, " ")
 }
 
 func prettyPath(p string) string {

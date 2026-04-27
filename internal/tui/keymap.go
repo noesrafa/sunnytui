@@ -11,7 +11,8 @@ type KeyMap struct {
 	NextSession   key.Binding
 	PrevSession   key.Binding
 	CloseSession  key.Binding
-	Rename        key.Binding
+	NewConv       key.Binding // ctrl+r — fresh claude conversation in the same session/cwd
+	Diff          key.Binding // ctrl+d — open the git diff viewer
 	Runs          key.Binding // open the runs manager modal
 	NewPane       key.Binding // open the new-terminal-pane dialog
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
@@ -27,12 +28,13 @@ func DefaultKeyMap() KeyMap {
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Newline:       key.NewBinding(key.WithKeys("ctrl+j", "alt+enter"), key.WithHelp("ctrl+j", "newline")),
 		Quit:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
-		ClearOrCancel: key.NewBinding(key.WithKeys("ctrl+c", "ctrl+d"), key.WithHelp("ctrl+c", "clear/cancel")),
+		ClearOrCancel: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "clear/cancel")),
 		NewSession:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new")),
 		NextSession:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),
 		PrevSession:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev")),
 		CloseSession:  key.NewBinding(key.WithKeys("ctrl+w"), key.WithHelp("ctrl+w", "close")),
-		Rename:        key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "rename")),
+		NewConv:       key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "new conv")),
+		Diff:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diff")),
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),
 		NewPane:       key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "new term")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),

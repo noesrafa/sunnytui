@@ -41,6 +41,60 @@ func gitBranch(cwd string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// ChangeStats summarizes the working tree against HEAD. Counts are file-level
+// (one file with mixed staged + unstaged edits is still one Modified). Path
+// is bucketed by the most "destructive" status it carries (Deleted wins over
+// Modified, Modified over Added) so the indicator never under-reports a
+// pending removal.
+type ChangeStats struct {
+	Added     int
+	Modified  int
+	Deleted   int
+	Untracked int
+}
+
+// Total is the file count across every bucket.
+func (c ChangeStats) Total() int {
+	return c.Added + c.Modified + c.Deleted + c.Untracked
+}
+
+// Dirty reports whether anything is pending.
+func (c ChangeStats) Dirty() bool { return c.Total() > 0 }
+
+// gitChangeStats parses `git status --porcelain` into per-bucket file counts.
+// Returns a zero ChangeStats when cwd isn't a git repo.
+func gitChangeStats(cwd string) ChangeStats {
+	out, err := exec.Command("git", "-C", cwd, "status", "--porcelain").Output()
+	if err != nil {
+		return ChangeStats{}
+	}
+	var c ChangeStats
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if len(line) < 3 {
+			continue
+		}
+		st := line[:2]
+		// Untracked: "??" wins outright.
+		if st == "??" {
+			c.Untracked++
+			continue
+		}
+		// Walk the two status columns picking the most destructive code.
+		x, y := rune(st[0]), rune(st[1])
+		switch {
+		case x == 'D' || y == 'D':
+			c.Deleted++
+		case x == 'M' || y == 'M' || x == 'R' || y == 'R' || x == 'C' || y == 'C':
+			c.Modified++
+		case x == 'A' || y == 'A':
+			c.Added++
+		default:
+			c.Modified++ // fallback bucket for unfamiliar codes
+		}
+	}
+	return c
+}
+
 type State int
 
 const (
@@ -67,7 +121,9 @@ type Session struct {
 	Cwd       string
 	Title     string
 	Model     string
+	Effort    string // claude --effort level (low/medium/high/xhigh/max)
 	Branch    string // git branch of Cwd (cached at creation)
+	Changes   ChangeStats // per-status counts of pending changes
 	State     State
 	Items     []Item
 	TotalCost float64
@@ -163,7 +219,9 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 		Cwd:       cwd,
 		Title:     title,
 		Model:     opts.Model,
+		Effort:    opts.Effort,
 		Branch:    gitBranch(cwd),
+		Changes:   gitChangeStats(cwd),
 		RemoteID:  opts.ResumeID, // optimistic; will be confirmed when init event arrives
 		Draft:     opts.Draft,
 		Items:     opts.Items,
@@ -176,15 +234,20 @@ func New(ctx context.Context, cwd string, opts Options) (*Session, error) {
 }
 
 // RefreshBranch re-reads the current git branch of Cwd and updates Branch.
-// Returns true if the branch changed, so the caller can decide whether to
-// re-render. Cheap (single git invocation), but callers should still throttle.
+// Returns true if the branch or dirty state changed, so the caller can decide
+// whether to re-render. Cheap (two git invocations), but callers should still
+// throttle.
 func (s *Session) RefreshBranch() bool {
-	b := gitBranch(s.Cwd)
-	if b == s.Branch {
-		return false
+	changed := false
+	if b := gitBranch(s.Cwd); b != s.Branch {
+		s.Branch = b
+		changed = true
 	}
-	s.Branch = b
-	return true
+	if c := gitChangeStats(s.Cwd); c != s.Changes {
+		s.Changes = c
+		changed = true
+	}
+	return changed
 }
 
 // Cancel interrupts the current turn (SIGINT to the claude subprocess).
@@ -402,6 +465,37 @@ func (s *Session) Close() error {
 	}
 	s.logger.Info("session closing")
 	return s.Stream.Close()
+}
+
+// Reset replaces the underlying claude process with a fresh one — same cwd,
+// model, effort — and clears the in-memory transcript. The previous Stream
+// is closed best-effort. Returns the new Stream so callers can rebind any
+// event-pump goroutines (e.g. waitForSession).
+func (s *Session) Reset(ctx context.Context, dangerousSkipPermissions bool) error {
+	if s.Stream != nil {
+		_ = s.Stream.Close()
+	}
+	stream, err := claude.NewStream(ctx, claude.StreamOpts{
+		Cwd:                      s.Cwd,
+		Model:                    s.Model,
+		Effort:                   s.Effort,
+		DangerousSkipPermissions: dangerousSkipPermissions,
+	})
+	if err != nil {
+		return err
+	}
+	s.Stream = stream
+	s.RemoteID = ""
+	s.Items = nil
+	s.TotalCost = 0
+	s.Turns = 0
+	s.LastErr = nil
+	s.State = StateIdle
+	s.turnHadOutput = false
+	s.Attachments = nil
+	s.Draft = ""
+	s.logger.Info("session reset")
+	return nil
 }
 
 func extractToolResult(raw json.RawMessage) string {

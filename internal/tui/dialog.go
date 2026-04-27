@@ -70,6 +70,15 @@ type RenameSessionMsg struct {
 // ConfirmQuitMsg signals the root model to terminate the program.
 type ConfirmQuitMsg struct{}
 
+// ConfirmCloseSessionMsg is emitted from the close-session confirmation dialog
+// to actually drop the active claude tab. The root model handles the close.
+type ConfirmCloseSessionMsg struct{}
+
+// ConfirmNewConvMsg requests the root model to spawn a fresh claude
+// conversation in the active session (same cwd / model / effort), discarding
+// the current transcript.
+type ConfirmNewConvMsg struct{}
+
 // Run management messages — emitted by run dialogs and consumed at the root.
 type OpenRunEditMsg struct{}
 type OpenRunLogsMsg struct{ ID string }

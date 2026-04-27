@@ -4,10 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 
-	"charm.land/bubbles/v2/filepicker"
-	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -24,7 +25,11 @@ const (
 )
 
 type NewSessionDialog struct {
-	fp        filepicker.Model
+	cwd       string
+	entries   []string // directory names in cwd (sorted)
+	filtered  []int    // indices into entries
+	selected  int
+	search    textinput.Model
 	styles    Styles
 	focus     newSessionFocus
 	modelIdx  int
@@ -33,37 +38,29 @@ type NewSessionDialog struct {
 }
 
 func NewNewSessionDialog(defaultCwd, defaultModel, defaultEffort string, s Styles) *NewSessionDialog {
-	fp := filepicker.New()
-	fp.DirAllowed = true
-	fp.FileAllowed = false
-	fp.ShowHidden = false
-	fp.ShowPermissions = false
-	fp.ShowSize = false
-	fp.AutoHeight = false
-	fp.SetHeight(12)
-	fp.Cursor = "›"
-	if defaultCwd != "" {
-		fp.CurrentDirectory = defaultCwd
-	} else {
-		fp.CurrentDirectory, _ = os.Getwd()
+	cwd := defaultCwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
 	}
-	// Free up "enter" so it confirms the dialog (not descends into a dir).
-	// Use right-arrow / l for descend, h / left / backspace for back.
-	fp.KeyMap.Open = key.NewBinding(key.WithKeys("right", "l"))
-	fp.KeyMap.Back = key.NewBinding(key.WithKeys("h", "backspace", "left"))
-	fp.KeyMap.Select = key.NewBinding(key.WithKeys("never"))
+	ti := textinput.New()
+	ti.Placeholder = "buscar carpeta…"
+	ti.Prompt = "› "
+	ti.CharLimit = 0
+	ti.SetWidth(50)
+	ti.Focus()
 
-	return &NewSessionDialog{
-		fp:        fp,
+	d := &NewSessionDialog{
+		cwd:       cwd,
+		search:    ti,
 		styles:    s,
 		focus:     focusPicker,
 		modelIdx:  max0(slices.Index(modelChoices, defaultModel)),
 		effortIdx: max0(slices.Index(effortChoices, defaultEffort)),
 	}
+	d.loadDir()
+	return d
 }
 
-// max0 returns n if positive, else 0. Used to clamp slices.Index's -1 for
-// "not found" to a sensible default focus.
 func max0(n int) int {
 	if n < 0 {
 		return 0
@@ -71,8 +68,74 @@ func max0(n int) int {
 	return n
 }
 
+func (d *NewSessionDialog) loadDir() {
+	d.entries = d.entries[:0]
+	items, err := os.ReadDir(d.cwd)
+	if err == nil {
+		for _, it := range items {
+			name := it.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if !it.IsDir() {
+				continue
+			}
+			d.entries = append(d.entries, name)
+		}
+		sort.Slice(d.entries, func(i, j int) bool {
+			return strings.ToLower(d.entries[i]) < strings.ToLower(d.entries[j])
+		})
+	}
+	d.refilter()
+	d.selected = 0
+}
+
+func (d *NewSessionDialog) refilter() {
+	q := strings.ToLower(strings.TrimSpace(d.search.Value()))
+	d.filtered = d.filtered[:0]
+	for i, name := range d.entries {
+		if q == "" || strings.Contains(strings.ToLower(name), q) {
+			d.filtered = append(d.filtered, i)
+		}
+	}
+	if d.selected >= len(d.filtered) {
+		d.selected = 0
+	}
+}
+
+func (d *NewSessionDialog) descend() {
+	if len(d.filtered) == 0 {
+		return
+	}
+	name := d.entries[d.filtered[d.selected]]
+	next := filepath.Join(d.cwd, name)
+	if info, err := os.Stat(next); err == nil && info.IsDir() {
+		d.cwd = next
+		d.search.SetValue("")
+		d.loadDir()
+	}
+}
+
+func (d *NewSessionDialog) ascend() {
+	parent := filepath.Dir(d.cwd)
+	if parent == d.cwd {
+		return
+	}
+	prev := filepath.Base(d.cwd)
+	d.cwd = parent
+	d.search.SetValue("")
+	d.loadDir()
+	// Try to land on the directory we just came from.
+	for i, idx := range d.filtered {
+		if d.entries[idx] == prev {
+			d.selected = i
+			break
+		}
+	}
+}
+
 func (d *NewSessionDialog) Init() tea.Cmd {
-	return d.fp.Init()
+	return textinput.Blink
 }
 
 func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
@@ -84,11 +147,49 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 			return d.confirm()
 		case "tab":
 			d.focus = (d.focus + 1) % numNewSessionFocus
+			d.applyFocus()
 			return nil
 		case "shift+tab":
 			d.focus = (d.focus + numNewSessionFocus - 1) % numNewSessionFocus
+			d.applyFocus()
 			return nil
 		}
+
+		if d.focus == focusPicker {
+			switch k.String() {
+			case "up", "ctrl+p":
+				if d.selected > 0 {
+					d.selected--
+				}
+				return nil
+			case "down", "ctrl+n":
+				if d.selected < len(d.filtered)-1 {
+					d.selected++
+				}
+				return nil
+			case "right":
+				d.descend()
+				return nil
+			case "left":
+				if d.search.Value() == "" {
+					d.ascend()
+					return nil
+				}
+			case "backspace":
+				if d.search.Value() == "" {
+					d.ascend()
+					return nil
+				}
+			}
+			prev := d.search.Value()
+			var cmd tea.Cmd
+			d.search, cmd = d.search.Update(msg)
+			if d.search.Value() != prev {
+				d.refilter()
+			}
+			return cmd
+		}
+
 		if d.focus == focusModel {
 			switch k.String() {
 			case "left", "h":
@@ -118,17 +219,19 @@ func (d *NewSessionDialog) Update(msg tea.Msg) tea.Cmd {
 			}
 		}
 	}
-
-	if d.focus == focusPicker {
-		var cmd tea.Cmd
-		d.fp, cmd = d.fp.Update(msg)
-		return cmd
-	}
 	return nil
 }
 
+func (d *NewSessionDialog) applyFocus() {
+	if d.focus == focusPicker {
+		d.search.Focus()
+	} else {
+		d.search.Blur()
+	}
+}
+
 func (d *NewSessionDialog) confirm() tea.Cmd {
-	cwd := strings.TrimSpace(d.fp.CurrentDirectory)
+	cwd := strings.TrimSpace(d.cwd)
 	if cwd == "" {
 		d.err = "directorio vacío"
 		return nil
@@ -158,20 +261,22 @@ func (d *NewSessionDialog) View(width, height int) string {
 	if boxW < 40 {
 		boxW = 40
 	}
-	fpH := height - 18
-	if fpH > 14 {
-		fpH = 14
-	}
-	if fpH < 6 {
-		fpH = 6
-	}
-	d.fp.SetHeight(fpH)
-
 	innerW := boxW - 6
+	d.search.SetWidth(innerW - 2)
+
+	listH := height - 22
+	if listH > 12 {
+		listH = 12
+	}
+	if listH < 5 {
+		listH = 5
+	}
+
 	title := HatchedTitle("New Session", innerW, colPrimary, colAccent, d.styles.DialogTitle)
-	pickerLabel := d.fieldLabel("directorio · "+d.fp.CurrentDirectory, d.focus == focusPicker)
-	pickerView := d.fp.View()
-	pickerHints := d.styles.Hint.Render("↑↓ navegar · → descender · ← atrás")
+	pickerLabel := d.fieldLabel("directorio · "+d.cwd, d.focus == focusPicker)
+	searchView := "  " + d.search.View()
+	listView := d.renderList(listH, innerW)
+	pickerHints := d.styles.Hint.Render("↑↓ navegar · → descender · ← atrás · type para filtrar")
 
 	modelLabel := d.fieldLabel("modelo", d.focus == focusModel)
 	modelRow := d.radioRow(modelChoices, d.modelIdx, d.focus == focusModel)
@@ -187,7 +292,8 @@ func (d *NewSessionDialog) View(width, height int) string {
 	lines := []string{
 		title, "",
 		pickerLabel,
-		pickerView,
+		searchView,
+		listView,
 		pickerHints,
 		"",
 		modelLabel,
@@ -202,6 +308,45 @@ func (d *NewSessionDialog) View(width, height int) string {
 	lines = append(lines, "", hints)
 
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(lines, "\n"))
+}
+
+func (d *NewSessionDialog) renderList(maxRows, innerW int) string {
+	if len(d.filtered) == 0 {
+		empty := "  " + d.styles.Hint.Render("(sin coincidencias)")
+		// Pad to the requested height so layout stays stable.
+		pad := strings.Repeat("\n", maxRows-1)
+		return empty + pad
+	}
+
+	// Window the list around the selection.
+	start := 0
+	if d.selected >= maxRows {
+		start = d.selected - maxRows + 1
+	}
+	end := start + maxRows
+	if end > len(d.filtered) {
+		end = len(d.filtered)
+	}
+
+	var rows []string
+	for i := start; i < end; i++ {
+		name := d.entries[d.filtered[i]]
+		if i == d.selected {
+			marker := d.styles.UserPrompt.Render("›")
+			rows = append(rows, marker+" "+d.styles.HeaderTitle.Render(name))
+		} else {
+			rows = append(rows, "  "+d.styles.AssistantText.Render(name))
+		}
+	}
+	// Pad to maxRows so the layout below doesn't jump as the list shrinks.
+	for len(rows) < maxRows {
+		rows = append(rows, "")
+	}
+	if len(d.filtered) > maxRows {
+		extra := len(d.filtered) - maxRows
+		rows = append(rows, d.styles.Hint.Render("  …"+strconv.Itoa(extra)+" más"))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (d *NewSessionDialog) fieldLabel(text string, focused bool) string {

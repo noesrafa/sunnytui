@@ -7,11 +7,13 @@ import (
 
 type sessionEventMsg struct {
 	SessionID string
+	Stream    *claude.Stream // identity of the stream that produced this event
 	Event     claude.Event
 }
 
 type sessionClosedMsg struct {
 	SessionID string
+	Stream    *claude.Stream // identity of the stream that closed; ignored if it isn't the session's current stream
 }
 
 // paneOutputMsg is fired by the per-pane PTY-read tea.Cmd. The data has
