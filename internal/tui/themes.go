@@ -52,6 +52,7 @@ type Theme struct {
 //   - Sunset Dark    — warm romantic
 //   - Tokyo Night    — cool moody
 //   - Synthwave      — neon party
+//   - Fallout        — Pip-Boy CRT (phosphor green + amber)
 //
 // Constraints applied to every entry:
 //   - Primary, Secondary, Tertiary, Accent are visually distinct hues so
@@ -139,6 +140,31 @@ var Themes = []Theme{
 			LogoTop:   hex("#FF7EDB"),
 			LogoBot:   hex("#36F9F6"),
 			LogoVer:   hex("#FEDE5D"),
+		},
+	},
+	{
+		// Pip-Boy 3000 vibe: phosphor green CRT on near-black with amber as
+		// the secondary "alt monitor" tone. Most accents stay in the green
+		// band so the UI reads as a single CRT screen; warning/danger pull
+		// toward amber/red so semantic meaning still cuts through. The logo
+		// gradient sweeps green → amber for that "RobCo terminal booting"
+		// feel.
+		ID:   "fallout",
+		Name: "Fallout (Pip-Boy)",
+		P: Palette{
+			Primary:   hex("#3CFF00"), // phosphor green (Pip-Boy)
+			Secondary: hex("#80FF40"), // bright lime (cursor — pops on green-on-black)
+			Tertiary:  hex("#FFB000"), // CRT amber (focused prompt)
+			Accent:    hex("#A8FF60"), // pale yellow-green (tools)
+			Success:   hex("#3CFF00"), // same phosphor — "OK" reads as green
+			Warning:   hex("#FFB000"), // amber, the CRT "caution" tone
+			Danger:    hex("#FF3030"), // radiation red, slightly desaturated
+			Muted:     hex("#4D7A3D"), // dim green, like a fading scanline
+			Text:      hex("#B5FF96"), // soft phosphor for body copy
+			Border:    hex("#143C14"), // very dark green — barely visible bezel
+			LogoTop:   hex("#FFB000"), // amber sweeping into…
+			LogoBot:   hex("#3CFF00"), // …phosphor green
+			LogoVer:   hex("#FFB000"),
 		},
 	},
 }

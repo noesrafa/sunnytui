@@ -135,12 +135,31 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 		return header
 	}
 	body := truncateLines(v.Result, 8, ctx.Width-4)
-	indent := s.ToolPrompt.Render("  ↳ ")
 	bodyStyle := s.ToolResult
 	if v.IsError {
 		bodyStyle = s.ResultError
 	}
-	return header + "\n" + lipgloss.JoinHorizontal(lipgloss.Top, indent, bodyStyle.Render(body))
+	// Manually prefix each body line with the indent — first line gets the
+	// "↳ " glyph, subsequent lines get just the matching width of spaces.
+	// Avoids lipgloss.JoinHorizontal, which (in lipgloss v2 + the bubbles
+	// viewport with SoftWrap=true) was inserting visible blank rows
+	// between the body lines on render. The selection overlay flattens
+	// those out via highlight.Apply's ScreenBuffer, which is why the
+	// transcript looked "wider" while the user was dragging — same content,
+	// just without the spurious blanks.
+	bodyLines := strings.Split(body, "\n")
+	indentLead := s.ToolPrompt.Render("  ↳ ")
+	indentRest := "    " // 4 spaces, same width as "  ↳ "
+	rendered := make([]string, 0, len(bodyLines)+1)
+	rendered = append(rendered, header)
+	for i, ln := range bodyLines {
+		prefix := indentRest
+		if i == 0 {
+			prefix = indentLead
+		}
+		rendered = append(rendered, prefix+bodyStyle.Render(ln))
+	}
+	return strings.Join(rendered, "\n")
 }
 
 func RenderTranscript(items []session.Item, ctx RenderContext) string {

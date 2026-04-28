@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 // Block-art SUNNY: 5 letters × 4 cols × 5 rows + 1-col gaps = 24 cols wide.
 var sunnyBlock = []string{
@@ -19,6 +19,25 @@ var sunnyBlock = []string{
 }
 
 const logoBlockW = 24
+
+// Logo gradient ramp cache. The ramp itself is identical every frame —
+// only the per-column phase shifts — so recomputing Blend1D on each tick
+// is pure waste. Cache by (top, bot) color identity; when the active
+// palette changes (settings dialog), the next render rebuilds.
+var (
+	cachedLogoRamp    []color.Color
+	cachedLogoRampTop color.Color
+	cachedLogoRampBot color.Color
+)
+
+func logoColorRamp() []color.Color {
+	if cachedLogoRamp == nil || cachedLogoRampTop != colLogoTop || cachedLogoRampBot != colLogoBot {
+		cachedLogoRamp = lipgloss.Blend1D(logoBlockW, colLogoTop, colLogoBot)
+		cachedLogoRampTop = colLogoTop
+		cachedLogoRampBot = colLogoBot
+	}
+	return cachedLogoRamp
+}
 
 // renderLogo paints the brand mark with an animated gradient sweep across
 // the SUNNY letters. `frame` is a monotonically-increasing counter
@@ -63,7 +82,7 @@ func renderLogo(width int, s Styles, frame int) string {
 	// We sample one ramp for the whole letter block (all 5 rows share
 	// columns), so the same column lights up the same color top-to-
 	// bottom — reads as a coherent vertical band sliding across.
-	ramp := lipgloss.Blend1D(logoBlockW, colLogoTop, colLogoBot)
+	ramp := logoColorRamp()
 	cols := make([]color.Color, logoBlockW)
 	span := 2 * logoBlockW
 	for x := 0; x < logoBlockW; x++ {

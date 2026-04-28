@@ -85,6 +85,12 @@ type Model struct {
 	// by renderLogo to shift the per-column color ramp each tick.
 	logoFrame int
 
+	// logoAlive guards the logoTickCmd chain so we don't queue duplicates
+	// when ensureLogoTick is called multiple times. The chain dies when
+	// shouldAnimateLogo() goes false (sets this back to false) and is
+	// resurrected by the next ensureLogoTick call that finds it idle.
+	logoAlive bool
+
 	// sysStats holds the most recent CPU + RAM sample. Refreshed by a
 	// background tick (sysStatsTickCmd → sysStatsResultMsg).
 	sysStats sysstats.Stats
@@ -236,7 +242,12 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
+	// Note: the logo gradient sweep is intentionally NOT started here.
+	// Sessions always restore as Idle (Thinking only flips on Send), so at
+	// boot shouldAnimateLogo() is false and the logo stays frozen on its
+	// last frame — still reads as a gradient, just static. The chain wakes
+	// up via ensureLogoTick from handleSubmit when the user sends a turn.
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -479,19 +490,19 @@ func (m Model) handleMouse(mm tea.MouseMsg) Model {
 		}
 		if !m.inChatRegion(e.X, e.Y) {
 			m.clearSelection()
-			m.refreshViewport()
+			m.refreshSelection()
 			return m
 		}
 		m.mouseDown = true
 		m.selStart = image.Pt(cx, cy)
 		m.selEnd = image.Pt(cx, cy)
-		m.refreshViewport()
+		m.refreshSelection()
 	case tea.MouseMotionMsg:
 		if !m.mouseDown {
 			return m
 		}
 		m.selEnd = image.Pt(cx, cy)
-		m.refreshViewport()
+		m.refreshSelection()
 	case tea.MouseReleaseMsg:
 		if !m.mouseDown {
 			return m
@@ -501,7 +512,7 @@ func (m Model) handleMouse(mm tea.MouseMsg) Model {
 		if text := m.copySelection(); text == "" {
 			m.clearSelection()
 		}
-		m.refreshViewport()
+		m.refreshSelection()
 	}
 	return m
 }
@@ -605,7 +616,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.handleBranchTick())
 	case logoTickMsg:
 		m.logoFrame++
-		cmds = append(cmds, logoTickCmd())
+		if m.shouldAnimateLogo() {
+			cmds = append(cmds, logoTickCmd())
+		} else {
+			m.logoAlive = false
+		}
 	case sysStatsTickMsg:
 		// Tick fires the actual sample (off-thread); sample posts back via
 		// sysStatsResultMsg. We re-arm the tick from the result handler so
@@ -889,10 +904,17 @@ func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		// When a dialog is open, hand the wheel to it so dialogs that own
-		// scrollable content (the diff viewer) can scroll. The chat
-		// viewport stays parked.
+		// scrollable content (the diff viewer, runs logs) can scroll. The
+		// chat viewport stays parked.
 		if m.overlay.HasOpen() {
 			return m, m.overlay.UpdateTop(mm), true
+		}
+		// Suppress wheel scroll *while* the user is mid-drag (selecting
+		// text). macOS trackpads sometimes emit wheel events alongside a
+		// drag and that was yanking the viewport out from under the
+		// selection. Outside an active drag, wheel scrolls normally.
+		if m.mouseDown {
+			return m, nil, true
 		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(mm)
@@ -1215,10 +1237,10 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	m.layout()
 	m.refreshViewport()
 	m.viewport.GotoBottom()
-	// Kick off both the spinner tick chain and the morphing-string anim.
-	// Each fires its own re-arm message; they die when the session goes back
-	// to idle.
-	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
+	// Kick off the spinner tick chain, the morphing-string anim, and the
+	// logo gradient sweep. Each fires its own re-arm message; they die when
+	// the session goes back to idle.
+	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step(), (&m).ensureLogoTick())
 }
 
 func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
@@ -1265,6 +1287,26 @@ func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
 // row reflects checkouts done outside the TUI in near real time.
 func branchTickCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return branchTickMsg{} })
+}
+
+// shouldAnimateLogo returns true while there is something "live" the user
+// might want feedback on: a session generating a turn, a run still alive,
+// or an open overlay (whose dialog could itself be animating). Outside
+// those, the logo freezes on its last frame — same gradient, just static.
+func (m *Model) shouldAnimateLogo() bool {
+	return m.anyThinking() || m.anyRunRunning() || m.overlay.HasOpen()
+}
+
+// ensureLogoTick is the resurrection point for the logo animation chain.
+// Idempotent: returns nil if a tick is already in flight or if there's
+// nothing to animate. Call wherever the model transitions toward an
+// active state (Send, overlay open, run start) so the logo wakes up.
+func (m *Model) ensureLogoTick() tea.Cmd {
+	if m.logoAlive || !m.shouldAnimateLogo() {
+		return nil
+	}
+	m.logoAlive = true
+	return logoTickCmd()
 }
 
 // logoTickCmd drives the brand-mark gradient sweep. 120ms cadence keeps
@@ -1358,6 +1400,24 @@ func (m *Model) layout() {
 		taW = 10
 	}
 	m.textarea.SetWidth(taW)
+}
+
+// refreshSelection re-applies the selection overlay on top of the cached
+// transcript WITHOUT re-rendering the items themselves. Drag-to-select fires
+// MouseMotionMsg at ~60Hz and the markdown render is the dominant cost in
+// refreshViewport — this is the difference between smooth selection and
+// molasses. Falls back to a full refresh if the cache is cold.
+func (m *Model) refreshSelection() {
+	if m.lastTranscript == "" {
+		m.refreshViewport()
+		return
+	}
+	out := m.lastTranscript
+	if m.hasSelection() {
+		sl, sc, el, ec := m.selectionRange()
+		out = highlight.Apply(out, m.viewport.Width(), lipgloss.Height(out), sl, sc, el, ec)
+	}
+	m.viewport.SetContent(out)
 }
 
 func (m *Model) refreshViewport() {
