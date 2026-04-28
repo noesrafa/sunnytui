@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"image"
 	"io"
 	"os"
 	"regexp"
@@ -13,7 +12,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
@@ -22,7 +20,7 @@ import (
 
 	"github.com/noesrafa/sunnytui/internal/anim"
 	imgclip "github.com/noesrafa/sunnytui/internal/clipboard"
-	"github.com/noesrafa/sunnytui/internal/highlight"
+	"github.com/noesrafa/sunnytui/internal/list"
 	"github.com/noesrafa/sunnytui/internal/runs"
 	"github.com/noesrafa/sunnytui/internal/session"
 	"github.com/noesrafa/sunnytui/internal/state"
@@ -61,15 +59,12 @@ type Model struct {
 	lastErr       error
 	lastCtrlC     time.Time
 
-	// App-level drag-to-select-and-copy (Crush-style). Coords are in
-	// rendered-transcript content space (X = column, Y = line within the
-	// full SetContent string, NOT the on-screen row).
-	mouseDown      bool
-	selStart       image.Point
-	selEnd         image.Point
-	lastTranscript string // unhighlighted content used for clipboard extract
+	// chat is the new list-based transcript viewport. It owns the full
+	// drag-to-select-and-copy state machine (multi-click, backward drag,
+	// auto-scroll past edges) so the parent Model just routes mouse + key
+	// events through.
+	chat *chatModel
 
-	viewport viewport.Model
 	textarea textarea.Model
 	spinner  spinner.Model
 
@@ -171,33 +166,8 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = lipgloss.NewStyle().Foreground(colWarning)
 
-	vp := viewport.New()
-	vp.SetWidth(80)
-	vp.SetHeight(20)
-	// SoftWrap = chat content always wraps to viewport width instead of
-	// allowing horizontal scroll. Long code lines, ASCII tables, etc.
-	// would otherwise let the user scroll the chat sideways and break
-	// the layout. This is the safety net beneath our manual wrappers
-	// (glamour WordWrap, lipgloss width-aware renders).
-	vp.SoftWrap = true
-	// In a chat we can't have the viewport eating letter keys: the
-	// default KeyMap treats j/k/h/l/u/d/b/f/space as scroll commands,
-	// so typing words like "kubernetes" or "javascript" would pan the
-	// transcript while you wrote them. Replace the default KeyMap with
-	// only PgUp/PgDn — same idea Crush uses for its log dialog
-	// (internal/ui/dialog/permissions.go) but stricter, since textarea
-	// owns the rest. Mouse wheel is handled separately in updateMouse.
-	disabled := key.NewBinding(key.WithDisabled())
-	vp.KeyMap = viewport.KeyMap{
-		PageUp:       key.NewBinding(key.WithKeys("pgup")),
-		PageDown:     key.NewBinding(key.WithKeys("pgdown")),
-		HalfPageUp:   disabled,
-		HalfPageDown: disabled,
-		Up:           disabled,
-		Down:         disabled,
-		Left:         disabled,
-		Right:        disabled,
-	}
+	chatVP := newChatModel()
+	chatVP.SetSize(80, 20)
 
 	thinking := anim.New(anim.Settings{
 		Size:       12,
@@ -229,7 +199,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		panes:         opts.Panes,
 		activeKind:    startKind,
 		overlay:       &Overlay{},
-		viewport:      vp,
+		chat:          chatVP,
 		textarea:      ta,
 		spinner:       sp,
 		thinkingAnim:  thinking,
@@ -380,7 +350,7 @@ func (m *Model) cycleTab(by int) {
 			m.textarea.CursorEnd()
 			m.layout()
 			m.refreshViewport()
-			m.viewport.GotoBottom()
+			m.chat.ScrollToBottom()
 		}
 	}
 }
@@ -420,9 +390,9 @@ func (m *Model) setFlatTabIndex(i int) {
 	m.panes.SetActive(i - clCount)
 }
 
-// inChatRegion reports whether (x, y) — in screen coords — falls inside the
-// transcript viewport: right of the sidebar, below the header, above the
-// input box. Pane mode and overlays are excluded by callers.
+// inChatRegion reports whether (x, y) in screen coords lies inside the chat
+// list. Used to gate mouse events at the parent before forwarding into the
+// chatModel — keeps drag-to-select from firing on the sidebar / textarea.
 func (m Model) inChatRegion(x, y int) bool {
 	if x < sidebarWidth+sidebarGap || x >= m.width {
 		return false
@@ -430,113 +400,17 @@ func (m Model) inChatRegion(x, y int) bool {
 	if y < headerHeight {
 		return false
 	}
-	if y >= headerHeight+m.viewport.Height() {
+	if y >= headerHeight+m.chat.Height() {
 		return false
 	}
 	return true
 }
 
-// screenToContent maps screen coordinates into transcript content
-// coordinates (X = column inside the rendered string, Y = line inside the
-// full SetContent string accounting for viewport scroll). Coords are
-// clamped to the chat content rectangle so callers can use the result
-// even when the user drags beyond the viewport.
-func (m Model) screenToContent(x, y int) (cx, cy int) {
-	cx = x - sidebarWidth - sidebarGap
-	if cx < 0 {
-		cx = 0
-	}
-	if w := m.viewport.Width(); w > 0 && cx >= w {
-		cx = w - 1
-	}
-	cy = (y - headerHeight) + m.viewport.YOffset()
-	if cy < 0 {
-		cy = 0
-	}
-	return
-}
-
-func (m Model) hasSelection() bool {
-	return m.selStart != m.selEnd
-}
-
-func (m *Model) clearSelection() {
-	m.mouseDown = false
-	m.selStart = image.Point{}
-	m.selEnd = image.Point{}
-}
-
-// selectionRange returns the selection coords normalized so (sl, sc) precedes
-// (el, ec) in reading order. Mirrors Crush's getHighlightRange.
-func (m Model) selectionRange() (sl, sc, el, ec int) {
-	a, b := m.selStart, m.selEnd
-	if a.Y > b.Y || (a.Y == b.Y && a.X > b.X) {
-		a, b = b, a
-	}
-	return a.Y, a.X, b.Y, b.X
-}
-
-// handleMouse implements drag-to-select-and-copy on the transcript. Mouse
-// down starts a selection at the cursor; motion extends it; release copies
-// the selected text to the clipboard (or clears the empty selection if it
-// was just a click).
-func (m Model) handleMouse(mm tea.MouseMsg) Model {
-	e := mm.Mouse()
-	cx, cy := m.screenToContent(e.X, e.Y)
-	switch ev := mm.(type) {
-	case tea.MouseClickMsg:
-		if ev.Button != tea.MouseLeft {
-			return m
-		}
-		if !m.inChatRegion(e.X, e.Y) {
-			m.clearSelection()
-			m.refreshSelection()
-			return m
-		}
-		m.mouseDown = true
-		m.selStart = image.Pt(cx, cy)
-		m.selEnd = image.Pt(cx, cy)
-		m.refreshSelection()
-	case tea.MouseMotionMsg:
-		if !m.mouseDown {
-			return m
-		}
-		m.selEnd = image.Pt(cx, cy)
-		m.refreshSelection()
-	case tea.MouseReleaseMsg:
-		if !m.mouseDown {
-			return m
-		}
-		m.mouseDown = false
-		m.selEnd = image.Pt(cx, cy)
-		if text := m.copySelection(); text == "" {
-			m.clearSelection()
-		}
-		m.refreshSelection()
-	}
-	return m
-}
-
-// copySelection extracts the selected text from the last rendered
-// transcript and writes it to the clipboard. Returns the extracted text
-// (or "" if the selection was empty).
-func (m Model) copySelection() string {
-	if !m.hasSelection() || m.lastTranscript == "" {
-		return ""
-	}
-	sl, sc, el, ec := m.selectionRange()
-	w := m.viewport.Width()
-	h := lipgloss.Height(m.lastTranscript)
-	text := highlight.Extract(m.lastTranscript, w, h, sl, sc, el, ec)
-	if text == "" {
-		return ""
-	}
-	if err := clipboard.WriteAll(text); err != nil {
-		m.logger.Warn("clipboard write failed", "err", err, "len", len(text))
-	} else {
-		m.logger.Info("clipboard write", "len", len(text))
-	}
-	return text
+// screenToChat maps screen coords into the chat list's local coords (origin
+// at the chat's top-left). Returns negative values when outside the chat,
+// callers may clamp as needed for drag-past-edges behavior.
+func (m Model) screenToChat(x, y int) (int, int) {
+	return x - sidebarWidth - sidebarGap, y - headerHeight
 }
 
 // anyRunRunning is true while at least one registered run has its child
@@ -639,18 +513,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// bottom and typing grows the textarea, we want to stay pinned
 		// after layout shrinks the viewport; if they had scrolled up
 		// to read history, we leave their position alone.
-		wasAtBottom := m.viewport.AtBottom()
+		wasAtBottom := m.chat.AtBottom()
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
 		if m.textarea.Value() != prevValue {
 			m.syncAttachmentMarkers() // drop attachments whose marker the user broke
 			m.layout()                // dynamic textarea height
 			if wasAtBottom {
-				m.viewport.GotoBottom()
+				m.chat.ScrollToBottom()
 			}
 		}
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
+		// Keyboard scroll: PgUp/PgDown forwards to the chat list. Other
+		// keys are textarea territory.
+		if km, ok := msg.(tea.KeyMsg); ok {
+			switch km.String() {
+			case "pgup":
+				m.chat.PageUp()
+			case "pgdown":
+				m.chat.PageDown()
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -684,7 +566,7 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.textarea.Reset()
 		m.layout()
 		m.refreshViewport()
-		m.viewport.GotoBottom()
+		m.chat.ScrollToBottom()
 		m.saveState()
 		return m, waitForSession(cur), true
 	case OpenRunEditMsg:
@@ -874,7 +756,7 @@ func (m *Model) switchToTab(kind string, index int) {
 			m.textarea.CursorEnd()
 			m.layout()
 			m.refreshViewport()
-			m.viewport.GotoBottom()
+			m.chat.ScrollToBottom()
 		}
 	case "pane":
 		if m.panes != nil {
@@ -888,48 +770,72 @@ func (m *Model) switchToTab(kind string, index int) {
 	}
 }
 
-// updateMouse routes mouse events. Wheel scrolls the viewport; click/motion
-// /release drive the app-level drag-to-select-and-copy. Returns handled=true
-// only for genuine MouseMsg values — other messages fall through unchanged.
+// updateMouse routes mouse events into the chatModel's drag-to-select state
+// machine. Wheel scrolls; click/motion/release drive selection. Returns
+// handled=true only for genuine MouseMsg values — other messages pass through.
 func (m Model) updateMouse(msg tea.Msg) (Model, tea.Cmd, bool) {
 	if mm, isWheel := msg.(tea.MouseWheelMsg); isWheel {
-		// Drop horizontal wheel events outright — trackpads emit them
-		// on lateral swipes and shift+wheel, both of which would scroll
-		// the chat sideways since SoftWrap can't help once the viewport
-		// has accepted an xOffset. Keep vertical wheel for scrolling.
+		// Horizontal wheel: drop. We don't support horizontal scroll in
+		// the chat — the list does its own width-aware wrapping.
 		if mm.Button == tea.MouseWheelLeft || mm.Button == tea.MouseWheelRight {
 			return m, nil, true
 		}
 		if mm.Mod.Contains(tea.ModShift) {
 			return m, nil, true
 		}
-		// When a dialog is open, hand the wheel to it so dialogs that own
-		// scrollable content (the diff viewer, runs logs) can scroll. The
-		// chat viewport stays parked.
+		// Dialog open? Forward so its scrollable content can move.
 		if m.overlay.HasOpen() {
 			return m, m.overlay.UpdateTop(mm), true
 		}
-		// Suppress wheel scroll *while* the user is mid-drag (selecting
-		// text). macOS trackpads sometimes emit wheel events alongside a
-		// drag and that was yanking the viewport out from under the
-		// selection. Outside an active drag, wheel scrolls normally.
-		if m.mouseDown {
+		// Pane mode: let the wheel pass to the embedded child terminal.
+		if m.activeKind == activePane {
+			return m, nil, false
+		}
+		// Vertical wheel on the chat: scroll a few lines per tick.
+		step := 3
+		if mm.Button == tea.MouseWheelUp {
+			m.chat.ScrollBy(-step)
+		} else if mm.Button == tea.MouseWheelDown {
+			m.chat.ScrollBy(step)
+		}
+		return m, nil, true
+	}
+	mm, ok := msg.(tea.MouseMsg)
+	if !ok {
+		return m, nil, false
+	}
+	// Overlays and pane mode never get app-level drag-to-select.
+	if m.overlay.HasOpen() || m.activeKind == activePane {
+		return m, nil, true
+	}
+	e := mm.Mouse()
+	cx, cy := m.screenToChat(e.X, e.Y)
+	switch ev := mm.(type) {
+	case tea.MouseClickMsg:
+		if ev.Button != tea.MouseLeft {
 			return m, nil, true
 		}
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(mm)
+		if !m.inChatRegion(e.X, e.Y) {
+			m.chat.ClearMouse()
+			return m, nil, true
+		}
+		_, cmd := m.chat.HandleMouseDown(cx, cy)
 		return m, cmd, true
-	}
-	if mm, ok := msg.(tea.MouseMsg); ok {
-		// In overlays, pane mode, or when the user has explicitly switched
-		// to terminal-native selection, our app-level handler stays out of
-		// the way.
-		if m.overlay.HasOpen() || m.activeKind == activePane {
-			return m, nil, true
+	case tea.MouseMotionMsg:
+		// Drag past the visible area: chatModel clamps to first/last.
+		m.chat.HandleMouseDrag(cx, cy)
+		return m, nil, true
+	case tea.MouseReleaseMsg:
+		if m.chat.HandleMouseUp(cx, cy) {
+			if m.chat.HasHighlight() {
+				if text := m.chat.CopySelection(); text != "" {
+					m.logger.Info("clipboard write", "len", len(text))
+				}
+			}
 		}
-		return m.handleMouse(mm), nil, true
+		return m, nil, true
 	}
-	return m, nil, false
+	return m, nil, true
 }
 
 func (m *Model) applyResize(msg tea.WindowSizeMsg) {
@@ -1236,7 +1142,7 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	}
 	m.layout()
 	m.refreshViewport()
-	m.viewport.GotoBottom()
+	m.chat.ScrollToBottom()
 	// Kick off the spinner tick chain, the morphing-string anim, and the
 	// logo gradient sweep. Each fires its own re-arm message; they die when
 	// the session goes back to idle.
@@ -1257,7 +1163,7 @@ func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
 	sess.HandleEvent(msg.Event)
 	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
 		m.refreshViewport()
-		m.viewport.GotoBottom()
+		m.chat.ScrollToBottom()
 	}
 	// Persist after each turn so a crash mid-session doesn't lose the
 	// transcript. The turn boundary is the state.Idle transition.
@@ -1392,8 +1298,7 @@ func (m *Model) layout() {
 	if vpH < 3 {
 		vpH = 3
 	}
-	m.viewport.SetWidth(mainW)
-	m.viewport.SetHeight(vpH)
+	m.chat.SetSize(mainW, vpH)
 
 	taW := mainW - 4
 	if taW < 10 {
@@ -1402,67 +1307,42 @@ func (m *Model) layout() {
 	m.textarea.SetWidth(taW)
 }
 
-// refreshSelection re-applies the selection overlay on top of the cached
-// transcript WITHOUT re-rendering the items themselves. Drag-to-select fires
-// MouseMotionMsg at ~60Hz and the markdown render is the dominant cost in
-// refreshViewport — this is the difference between smooth selection and
-// molasses. Falls back to a full refresh if the cache is cold.
-func (m *Model) refreshSelection() {
-	if m.lastTranscript == "" {
-		m.refreshViewport()
-		return
-	}
-	out := m.lastTranscript
-	if m.hasSelection() {
-		sl, sc, el, ec := m.selectionRange()
-		out = highlight.Apply(out, m.viewport.Width(), lipgloss.Height(out), sl, sc, el, ec)
-	}
-	m.viewport.SetContent(out)
-}
-
+// refreshViewport rebuilds the chat list from the active session's items.
+// The chat list owns its own render cache + selection overlay so this is
+// idempotent and cheap when the items array hasn't changed.
 func (m *Model) refreshViewport() {
 	cur := m.manager.Current()
 	if cur == nil {
-		m.viewport.SetContent(m.styles.Hint.Render("ninguna sesión activa — ctrl+n para crear"))
+		m.chat.SetItems(nil)
 		return
 	}
-	w := m.viewport.Width()
-	if w <= 0 {
-		w = m.width
-	}
 	if len(cur.Items) == 0 && cur.State == session.StateIdle {
-		m.viewport.SetContent(m.welcomeText())
+		// Render the welcome screen as a single pseudo-item so the list
+		// shows it. Wrapping a plain string in a stringItem keeps the
+		// list machinery happy without a special-case render path.
+		m.chat.SetItems([]list.Item{stringItem(m.welcomeText())})
 		return
 	}
 	ctx := RenderContext{
-		Width:     w,
+		Width:     m.chat.Width(),
 		Styles:    m.styles,
 		LiveFrame: m.spinner.View(),
 		Markdown:  m.markdown,
 		ModelName: cur.Model,
 	}
-	out := RenderTranscript(cur.Items, ctx)
-	// Trailing morphing spinner while the assistant is responding.
+	if ctx.Width <= 0 {
+		ctx.Width = m.width
+	}
+	items := buildChatItems(cur, ctx)
 	if cur.State == session.StateThinking {
-		label := cur.LiveStatus() // "thinking" / "writing" / "running ToolName"
+		label := cur.LiveStatus()
 		if label == "" {
 			label = "thinking"
 		}
 		m.thinkingAnim.SetLabel(label)
-		spinnerLine := m.styles.AssistantMsgBlurred.Render(m.thinkingAnim.Render())
-		if out != "" {
-			out += "\n\n"
-		}
-		out += spinnerLine
+		items = append(items, stringItem("  "+m.thinkingAnim.Render()))
 	}
-	// Cache the unhighlighted version so copySelection can extract plain
-	// text from the same string the user is looking at.
-	m.lastTranscript = out
-	if m.hasSelection() {
-		sl, sc, el, ec := m.selectionRange()
-		out = highlight.Apply(out, m.viewport.Width(), lipgloss.Height(out), sl, sc, el, ec)
-	}
-	m.viewport.SetContent(out)
+	m.chat.SetItems(items)
 }
 
 func (m *Model) welcomeText() string {
@@ -1491,7 +1371,7 @@ func (m *Model) welcomeText() string {
 }
 
 func (m *Model) markdown(text string) string {
-	w := m.viewport.Width() - 4
+	w := m.chat.Width() - 4
 	if w < 20 {
 		w = 20
 	}

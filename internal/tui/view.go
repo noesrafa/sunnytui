@@ -144,7 +144,7 @@ func (m Model) renderMain(height int) string {
 	// layout()), so we render the same number here via a string of N-1
 	// newlines (JoinVertical itself adds one between elements).
 	cur := m.manager.Current()
-	transcript := m.viewport.View()
+	transcript := m.chat.Render()
 	input := m.renderInput(cur)
 	hint := m.renderInputHint()
 	gap := strings.Repeat("\n", inputTopGap-1)

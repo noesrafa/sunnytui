@@ -19,65 +19,6 @@ type RenderContext struct {
 	ModelName string              // active session's claude model id (for attribution row)
 }
 
-func RenderItem(it session.Item, ctx RenderContext) string {
-	s := ctx.Styles
-	switch v := it.(type) {
-	case session.UserItem:
-		// Crush pattern: vertical ▌/│ border in primary + 1 col padding.
-		body := wrap(v.Text, ctx.Width-3) // -3 = border + padding + safety
-		if len(v.Attachments) > 0 {
-			lines := make([]string, 0, len(v.Attachments)+1)
-			lines = append(lines, body)
-			for _, a := range v.Attachments {
-				label := fmt.Sprintf("↳ [Image #%d] %s", a.Index, shortenPath(a.Path, ctx.Width-6))
-				lines = append(lines, s.Hint.Render(label))
-			}
-			body = strings.Join(lines, "\n")
-		}
-		return s.UserMsgBlurred.Render(body)
-
-	case session.AssistantTextItem:
-		// Crush: padding-left 2, no prefix character, no border.
-		var body string
-		if ctx.Markdown != nil {
-			body = ctx.Markdown(v.Text)
-		} else {
-			body = wrap(v.Text, ctx.Width-3)
-		}
-		return s.AssistantMsgBlurred.Render(body)
-
-	case session.ThinkingItem:
-		return s.AssistantMsgBlurred.Render(s.AssistantThink.Render(wrap(v.Text, ctx.Width-3)))
-
-	case session.ToolUseItem:
-		return s.AssistantMsgBlurred.Render(renderToolUse(v, ctx))
-
-	case session.ToolResultItem:
-		preview := truncateLines(v.Content, 6, ctx.Width-4)
-		return s.AssistantMsgBlurred.Render(s.ToolResult.Render("↳ " + preview))
-
-	case session.EmptyResponseItem:
-		return s.AssistantMsgBlurred.Render(s.Hint.Render("(sin respuesta)"))
-
-	case session.ErrorItem:
-		return s.AssistantMsgBlurred.Render(s.ResultError.Render("✗ " + v.Message))
-
-	case session.ResultItem:
-		// Crush attribution row: "◇ <model> · <duration>".
-		modelName := simplifyModelName(ctx.ModelName)
-		duration := fmt.Sprintf("%.1fs", float64(v.DurationMs)/1000.0)
-		icon := s.AttribIcon.Render("◇")
-		mdl := s.AttribModel.Render(modelName)
-		dur := s.AttribDuration.Render(duration)
-		errIcon := ""
-		if v.IsError {
-			errIcon = s.ResultError.Render("✗ ") + " "
-		}
-		return errIcon + icon + " " + mdl + " · " + dur
-	}
-	return ""
-}
-
 // simplifyModelName strips Crush-style noise from claude model ids:
 // "claude-opus-4-7[1m]" → "Opus 4.7", "claude-sonnet-4-6" → "Sonnet 4.6".
 func simplifyModelName(s string) string {
@@ -160,20 +101,6 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 		rendered = append(rendered, prefix+bodyStyle.Render(ln))
 	}
 	return strings.Join(rendered, "\n")
-}
-
-func RenderTranscript(items []session.Item, ctx RenderContext) string {
-	if len(items) == 0 {
-		return ctx.Styles.Hint.Render("escribe un mensaje y dale enter…")
-	}
-	parts := make([]string, 0, len(items)*2)
-	for i, it := range items {
-		parts = append(parts, RenderItem(it, ctx))
-		if i < len(items)-1 {
-			parts = append(parts, "")
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 // shortenPath collapses /Users/me/.sunnytui/images/foo.png down to fit
