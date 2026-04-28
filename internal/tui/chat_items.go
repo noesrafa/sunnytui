@@ -204,7 +204,11 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 	s := ctx.Styles
 	switch v := it.(type) {
 	case session.UserItem:
-		body := wrap(v.Text, ctx.Width-1) // -1 for safety vs prior (-3 in RenderItem)
+		// Apply UserText (colText) so the body text picks up the active
+		// palette's text color — Fallout's phosphor green, Whisper's near
+		// white, etc. Without this the user text renders in the terminal
+		// default foreground regardless of theme.
+		body := s.UserText.Render(wrap(v.Text, ctx.Width-1))
 		if len(v.Attachments) > 0 {
 			lines := make([]string, 0, len(v.Attachments)+1)
 			lines = append(lines, body)
@@ -218,9 +222,12 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 
 	case session.AssistantTextItem:
 		if ctx.Markdown != nil {
+			// Markdown gets glamour's dark style (palette-agnostic by
+			// design — re-themeing glamour is a deeper change). Plain
+			// text fallback DOES follow the active palette.
 			return strings.TrimSuffix(ctx.Markdown(v.Text), "\n")
 		}
-		return wrap(v.Text, ctx.Width-1)
+		return s.AssistantText.Render(wrap(v.Text, ctx.Width-1))
 
 	case session.ThinkingItem:
 		return s.AssistantThink.Render(wrap(v.Text, ctx.Width-1))

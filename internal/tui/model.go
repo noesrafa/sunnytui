@@ -80,12 +80,6 @@ type Model struct {
 	// by renderLogo to shift the per-column color ramp each tick.
 	logoFrame int
 
-	// logoAlive guards the logoTickCmd chain so we don't queue duplicates
-	// when ensureLogoTick is called multiple times. The chain dies when
-	// shouldAnimateLogo() goes false (sets this back to false) and is
-	// resurrected by the next ensureLogoTick call that finds it idle.
-	logoAlive bool
-
 	// sysStats holds the most recent CPU + RAM sample. Refreshed by a
 	// background tick (sysStatsTickCmd → sysStatsResultMsg).
 	sysStats sysstats.Stats
@@ -212,12 +206,11 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 }
 
 func (m Model) Init() tea.Cmd {
-	// Note: the logo gradient sweep is intentionally NOT started here.
-	// Sessions always restore as Idle (Thinking only flips on Send), so at
-	// boot shouldAnimateLogo() is false and the logo stays frozen on its
-	// last frame — still reads as a gradient, just static. The chain wakes
-	// up via ensureLogoTick from handleSubmit when the user sends a turn.
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
+	// The logo gradient sweep ticks for the lifetime of the program. The
+	// list-based chat is cheap enough now that we don't need to gate the
+	// logo animation on activity — visually you always see the brand mark
+	// breathing.
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -490,11 +483,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.handleBranchTick())
 	case logoTickMsg:
 		m.logoFrame++
-		if m.shouldAnimateLogo() {
-			cmds = append(cmds, logoTickCmd())
-		} else {
-			m.logoAlive = false
-		}
+		cmds = append(cmds, logoTickCmd())
 	case sysStatsTickMsg:
 		// Tick fires the actual sample (off-thread); sample posts back via
 		// sysStatsResultMsg. We re-arm the tick from the result handler so
@@ -1149,10 +1138,10 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	m.layout()
 	m.refreshViewport()
 	m.chat.ScrollToBottom()
-	// Kick off the spinner tick chain, the morphing-string anim, and the
-	// logo gradient sweep. Each fires its own re-arm message; they die when
-	// the session goes back to idle.
-	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step(), (&m).ensureLogoTick())
+	// Kick off the spinner tick chain and the morphing-string anim — both
+	// die when the session goes idle. The logo tick lives independently
+	// (always running) so we don't need to resurrect it here.
+	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
 }
 
 func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
@@ -1199,26 +1188,6 @@ func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
 // row reflects checkouts done outside the TUI in near real time.
 func branchTickCmd() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return branchTickMsg{} })
-}
-
-// shouldAnimateLogo returns true while there is something "live" the user
-// might want feedback on: a session generating a turn, a run still alive,
-// or an open overlay (whose dialog could itself be animating). Outside
-// those, the logo freezes on its last frame — same gradient, just static.
-func (m *Model) shouldAnimateLogo() bool {
-	return m.anyThinking() || m.anyRunRunning() || m.overlay.HasOpen()
-}
-
-// ensureLogoTick is the resurrection point for the logo animation chain.
-// Idempotent: returns nil if a tick is already in flight or if there's
-// nothing to animate. Call wherever the model transitions toward an
-// active state (Send, overlay open, run start) so the logo wakes up.
-func (m *Model) ensureLogoTick() tea.Cmd {
-	if m.logoAlive || !m.shouldAnimateLogo() {
-		return nil
-	}
-	m.logoAlive = true
-	return logoTickCmd()
 }
 
 // logoTickCmd drives the brand-mark gradient sweep. 120ms cadence keeps
