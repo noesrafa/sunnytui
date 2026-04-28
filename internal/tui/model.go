@@ -1354,7 +1354,9 @@ func (m *Model) markdown(text string) string {
 	if m.md == nil || m.mdW != w {
 		m.mdCache = nil
 		r, err := glamour.NewTermRenderer(
-			glamour.WithStandardStyle("dark"),
+			// Themed style derived from the active palette, so headers,
+			// links, code, syntax highlighting, etc. all swap with ctrl+s.
+			glamour.WithStyles(markdownStyleConfig()),
 			glamour.WithWordWrap(w),
 			glamour.WithEmoji(),
 		)
