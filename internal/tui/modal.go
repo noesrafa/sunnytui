@@ -46,3 +46,42 @@ func applyForegroundGradient(s string, from, to color.Color) string {
 	}
 	return b.String()
 }
+
+// applyAnimatedForegroundGradient is applyForegroundGradient with a phase
+// offset — the colors slide left → right and bounce back, same trick the
+// brand logo uses. `frame` is the monotonically-increasing logo tick
+// counter; passing the model's logoFrame makes the gradient animate in
+// lockstep with the brand mark.
+func applyAnimatedForegroundGradient(s string, from, to color.Color, frame int) string {
+	if s == "" {
+		return ""
+	}
+	var clusters []string
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		clusters = append(clusters, string(g.Runes()))
+	}
+	n := len(clusters)
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return lipgloss.NewStyle().Foreground(from).Render(clusters[0])
+	}
+	ramp := lipgloss.Blend1D(n, from, to)
+	span := 2 * n
+	var b strings.Builder
+	for i, c := range clusters {
+		// Palindromic wrap so the gradient flows out and back without a
+		// jarring jump when the phase wraps around.
+		pos := (i + frame) % span
+		if pos < 0 {
+			pos += span
+		}
+		if pos >= n {
+			pos = span - 1 - pos
+		}
+		b.WriteString(lipgloss.NewStyle().Foreground(ramp[pos]).Render(c))
+	}
+	return b.String()
+}

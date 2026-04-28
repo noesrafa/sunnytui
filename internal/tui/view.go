@@ -181,7 +181,7 @@ func (m Model) renderInputHint() string {
 		if cur.Effort != "" {
 			text = cur.Model + " " + cur.Effort
 		}
-		parts = append(parts, applyForegroundGradient(text, colSecondary, colPrimary))
+		parts = append(parts, applyAnimatedForegroundGradient(text, colSecondary, colPrimary, m.logoFrame))
 	}
 	if cur.Branch != "" {
 		branch := s.HeaderDim.Render("⌥ " + cur.Branch)
