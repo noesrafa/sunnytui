@@ -21,6 +21,8 @@ type KeyMap struct {
 	Game          key.Binding // ctrl+g — open minigames modal (snake)
 	ScrollUp      key.Binding
 	ScrollDn      key.Binding
+	ScrollTop     key.Binding // home — jump to start of transcript
+	ScrollBottom  key.Binding // end — jump to bottom + re-enable follow
 	Paste         key.Binding // ctrl+v — image-aware paste (image first, then text)
 }
 
@@ -44,6 +46,8 @@ func DefaultKeyMap() KeyMap {
 		Game:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "game")),
 		ScrollUp:      key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
 		ScrollDn:      key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
+		ScrollTop:     key.NewBinding(key.WithKeys("home"), key.WithHelp("home", "top")),
+		ScrollBottom:  key.NewBinding(key.WithKeys("end"), key.WithHelp("end", "bottom")),
 		Paste:         key.NewBinding(key.WithKeys("ctrl+v"), key.WithHelp("ctrl+v", "paste image/text")),
 	}
 }

@@ -512,14 +512,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.chat.ScrollToBottom()
 			}
 		}
-		// Keyboard scroll: PgUp/PgDown forwards to the chat list. Other
-		// keys are textarea territory.
+		// Keyboard scroll: PgUp/PgDown/Home/End forward to the chat list.
+		// Other keys are textarea territory.
 		if km, ok := msg.(tea.KeyMsg); ok {
 			switch km.String() {
 			case "pgup":
 				m.chat.PageUp()
 			case "pgdown":
 				m.chat.PageDown()
+			case "home":
+				m.chat.ScrollToTop()
+			case "end":
+				m.chat.ScrollToBottom()
 			}
 		}
 	}
@@ -1156,9 +1160,17 @@ func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
 	}
 	wasThinking := sess.State == session.StateThinking
 	sess.HandleEvent(msg.Event)
+	turnFinished := wasThinking && sess.State != session.StateThinking
 	if cur := m.manager.Current(); cur != nil && cur.ID == sess.ID {
 		m.refreshViewport()
-		m.chat.ScrollToBottom()
+		// Only auto-scroll on the turn-complete edge — during streaming
+		// we leave the scroll alone so the user can read prior history
+		// without being yanked back to the bottom on every delta. The
+		// `end` key (or any scroll-to-bottom action they take) gets them
+		// to the latest content when they want it.
+		if turnFinished {
+			m.chat.ScrollToBottom()
+		}
 	}
 	// Persist after each turn so a crash mid-session doesn't lose the
 	// transcript. The turn boundary is the state.Idle transition.
@@ -1343,6 +1355,8 @@ func (m *Model) welcomeText() string {
 		row("ctrl+j / alt+enter", "nueva línea"),
 		row("ctrl+←/→", "saltar palabras"),
 		row("ctrl+del", "borrar palabra"),
+		row("pgup/pgdn", "scroll del chat"),
+		row("home/end", "saltar al inicio / fin"),
 	}, "\n")
 }
 

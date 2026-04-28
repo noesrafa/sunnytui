@@ -353,13 +353,27 @@ func (l *List) SetItems(items ...Item) {
 	l.setItems(true, items...)
 }
 
-// setItems sets the items in the list. If evict is true, it clears the
-// rendered item cache.
+// setItems sets the items in the list. Preserves the current scroll
+// position (offsetIdx + offsetLine) when the previous offset is still
+// valid against the new slice — without this, every streaming delta
+// from the chat would yank the user back to the top of the visible
+// item because we'd reset offsetLine to 0 on each rebuild.
 func (l *List) setItems(evict bool, items ...Item) {
 	l.items = items
 	l.selectedIdx = min(l.selectedIdx, len(l.items)-1)
-	l.offsetIdx = min(l.offsetIdx, len(l.items)-1)
-	l.offsetLine = 0
+	if len(l.items) == 0 {
+		l.offsetIdx = 0
+		l.offsetLine = 0
+		return
+	}
+	if l.offsetIdx >= len(l.items) {
+		l.offsetIdx = len(l.items) - 1
+		l.offsetLine = 0
+	}
+	// Otherwise keep offsetIdx + offsetLine. The active item may have
+	// grown (assistant text streaming) but the user's anchor still
+	// points at the same content from above; clamping offsetLine to a
+	// new height isn't necessary because the visible window auto-clips.
 }
 
 // AppendItems appends items to the list.

@@ -143,6 +143,7 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 		s.StatusKey.Render("ctrl+u") + s.Hint.Render(" runs"),
 		s.StatusKey.Render("ctrl+k") + s.Hint.Render(" switch"),
 		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" settings"),
+		s.StatusKey.Render("end") + s.Hint.Render("    bottom"),
 		s.StatusKey.Render("tab") + s.Hint.Render("    next"),
 		s.StatusKey.Render("ctrl+w") + s.Hint.Render(" close"),
 		s.StatusKey.Render("esc") + s.Hint.Render("    quit"),

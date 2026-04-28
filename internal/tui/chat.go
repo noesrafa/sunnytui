@@ -83,13 +83,13 @@ func (c *chatModel) SetSize(width, height int) {
 func (c *chatModel) Width() int  { return c.list.Width() }
 func (c *chatModel) Height() int { return c.list.Height() }
 
-// SetItems replaces the list contents. We re-anchor to the bottom when follow
-// is on, so streaming turns auto-scroll without the user having to chase them.
+// SetItems replaces the list contents without touching the scroll offset.
+// list.setItems preserves offsetIdx + offsetLine when they're still valid,
+// so a streaming delta won't yank the user mid-read. Callers that want to
+// re-anchor to the bottom (turn complete, user just sent, end key) call
+// ScrollToBottom explicitly afterwards.
 func (c *chatModel) SetItems(items []list.Item) {
 	c.list.SetItems(items...)
-	if c.follow {
-		c.list.ScrollToBottom()
-	}
 }
 
 // Render returns the visible slice of the chat list.
@@ -104,6 +104,13 @@ func (c *chatModel) AtBottom() bool { return c.list.AtBottom() }
 func (c *chatModel) ScrollToBottom() {
 	c.list.ScrollToBottom()
 	c.follow = true
+}
+
+// ScrollToTop jumps to the start of the transcript and disables follow so
+// the user can read history without streaming yanking them back.
+func (c *chatModel) ScrollToTop() {
+	c.list.ScrollToTop()
+	c.follow = false
 }
 
 // ScrollBy scrolls by a number of lines (positive = down). Disables follow
