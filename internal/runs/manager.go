@@ -49,12 +49,21 @@ func Load() (*Manager, error) {
 	if err := json.Unmarshal(raw, &loaded); err != nil {
 		return nil, fmt.Errorf("decode runs.json: %w", err)
 	}
-	for _, r := range loaded {
-		if r.ID == "" {
-			r.ID = nextID()
-		}
+	// Reassign IDs on load so the runtime always has unique, consecutive
+	// IDs regardless of what the persisted file looked like — earlier
+	// sunnytui versions reset idSeq across processes, which silently
+	// minted duplicate "r1"s and made every run resolve to the first one
+	// (e.g. opening logs always tailed run #1's buffer).
+	for i, r := range loaded {
+		r.ID = fmt.Sprintf("r%d", i+1)
 		r.Status = StatusStopped
 		m.runs = append(m.runs, r)
+	}
+	// Advance idSeq past the highest assigned ID so later Adds don't
+	// collide with anything we just loaded.
+	target := int64(len(m.runs))
+	for idSeq.Load() < target {
+		idSeq.Add(1)
 	}
 	return m, nil
 }

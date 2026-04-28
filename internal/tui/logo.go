@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.8.5"
+const Version = "0.8.6"
 
 // Block-art SUNNY: 5 letters × 4 cols × 5 rows + 1-col gaps = 24 cols wide.
 var sunnyBlock = []string{
