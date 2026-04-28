@@ -933,6 +933,12 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 			cwd = m.initialCwd
 		}
 		return m, m.overlay.Open(NewDiffDialog(cwd, branch, changes, m.styles)), true
+	case key.Matches(msg, m.keymap.Rename):
+		if cur := m.manager.Current(); cur != nil {
+			d := NewRenameDialog(cur.Title, m.styles)
+			return m, m.overlay.Open(d), true
+		}
+		return m, nil, true
 	case key.Matches(msg, m.keymap.NewConv):
 		if cur := m.manager.Current(); cur != nil {
 			body := []string{
@@ -1357,7 +1363,8 @@ func (m *Model) welcomeText() string {
 		s.AssistantText.Render("escribe un mensaje para empezar a chatear con claude code"),
 		"",
 		row("ctrl+n", "añade una sesión en otro directorio"),
-		row("ctrl+r", "nueva conversación en la sesión actual"),
+		row("ctrl+r", "renombrar la sesión actual"),
+		row("ctrl+l", "resetear el chat (nueva conversación)"),
 		row("ctrl+d", "ver el diff del repo"),
 		row("tab   ", "cambia entre sesiones"),
 		row("ctrl+w", "cierra la sesión actual"),

@@ -52,7 +52,8 @@ type Theme struct {
 //   - Sunset Dark    — warm romantic
 //   - Tokyo Night    — cool moody
 //   - Synthwave      — neon party
-//   - Fallout        — Pip-Boy CRT (phosphor green + amber)
+//   - Fallout        — Pip-Boy CRT (full phosphor green monochrome)
+//   - Whisper        — quiet mono gray, almost no color
 //
 // Constraints applied to every entry:
 //   - Primary, Secondary, Tertiary, Accent are visually distinct hues so
@@ -143,28 +144,53 @@ var Themes = []Theme{
 		},
 	},
 	{
-		// Pip-Boy 3000 vibe: phosphor green CRT on near-black with amber as
-		// the secondary "alt monitor" tone. Most accents stay in the green
-		// band so the UI reads as a single CRT screen; warning/danger pull
-		// toward amber/red so semantic meaning still cuts through. The logo
-		// gradient sweeps green → amber for that "RobCo terminal booting"
-		// feel.
+		// Pip-Boy 3000: full phosphor green monochrome on near-black. The
+		// real Pip-Boy is a single-channel CRT — every glyph is the same
+		// phosphor, only the brightness/saturation varies. We mirror that:
+		// every accent sits in the green band, no amber rescue color. The
+		// logo sweeps from a brighter scanline tip into deep phosphor for
+		// that "RobCo terminal warming up" look.
 		ID:   "fallout",
 		Name: "Fallout (Pip-Boy)",
 		P: Palette{
-			Primary:   hex("#3CFF00"), // phosphor green (Pip-Boy)
-			Secondary: hex("#80FF40"), // bright lime (cursor — pops on green-on-black)
-			Tertiary:  hex("#FFB000"), // CRT amber (focused prompt)
-			Accent:    hex("#A8FF60"), // pale yellow-green (tools)
-			Success:   hex("#3CFF00"), // same phosphor — "OK" reads as green
-			Warning:   hex("#FFB000"), // amber, the CRT "caution" tone
-			Danger:    hex("#FF3030"), // radiation red, slightly desaturated
-			Muted:     hex("#4D7A3D"), // dim green, like a fading scanline
-			Text:      hex("#B5FF96"), // soft phosphor for body copy
-			Border:    hex("#143C14"), // very dark green — barely visible bezel
-			LogoTop:   hex("#FFB000"), // amber sweeping into…
-			LogoBot:   hex("#3CFF00"), // …phosphor green
-			LogoVer:   hex("#FFB000"),
+			Primary:   hex("#33FF66"), // pure phosphor green
+			Secondary: hex("#7FFFA0"), // brighter scanline lime (cursor)
+			Tertiary:  hex("#5AFF8C"), // mid green (focused prompt)
+			Accent:    hex("#9FFFB8"), // pale phosphor (tools)
+			Success:   hex("#33FF66"),
+			Warning:   hex("#A8FF60"), // yellow-green — same band, brighter
+			Danger:    hex("#5AFF8C"), // bold green for errors too — Pip-Boy never breaks the palette
+			Muted:     hex("#1F8040"), // dim green scanline
+			Text:      hex("#7FFF99"), // soft phosphor body copy
+			Border:    hex("#0E3318"), // near-black green bezel
+			LogoTop:   hex("#9FFFB8"), // bright tip
+			LogoBot:   hex("#1F8040"), // deep base
+			LogoVer:   hex("#5AFF8C"),
+		},
+	},
+	{
+		// Whisper: a deliberately quiet light-on-dark monochrome. Designed
+		// for long sessions where the chat shouldn't yell — every accent is
+		// a different value of cool gray, with one warm-white as Primary so
+		// the cursor and key ticks still pop. Errors are the only place we
+		// break the palette: a desaturated rust so they read as "wrong"
+		// without nuking the calm. Logo is a soft white-to-gray fade.
+		ID:   "whisper",
+		Name: "Whisper (Mono Gray)",
+		P: Palette{
+			Primary:   hex("#F5F5F5"), // near-white
+			Secondary: hex("#C8C8C8"), // light gray (cursor)
+			Tertiary:  hex("#9E9E9E"), // mid gray (focused prompt)
+			Accent:    hex("#7A7A7A"), // soft gray (tools)
+			Success:   hex("#B0B0B0"), // gray "ok" — no green
+			Warning:   hex("#D0D0D0"), // brighter gray for caution
+			Danger:    hex("#C97D6E"), // muted rust — only color in the palette
+			Muted:     hex("#5A5A5A"), // shadow gray
+			Text:      hex("#E5E5E5"), // body copy
+			Border:    hex("#2A2A2A"), // barely-there panel rule
+			LogoTop:   hex("#F5F5F5"),
+			LogoBot:   hex("#7A7A7A"),
+			LogoVer:   hex("#9E9E9E"),
 		},
 	},
 }
