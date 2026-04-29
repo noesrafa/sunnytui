@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.8.6"
+const Version = "0.9.0"
 
 // Block-art SUNNY: 5 letters × 4 cols × 5 rows + 1-col gaps = 24 cols wide.
 var sunnyBlock = []string{
@@ -28,6 +28,11 @@ var (
 	cachedLogoRamp    []color.Color
 	cachedLogoRampTop color.Color
 	cachedLogoRampBot color.Color
+
+	cachedBrandRamp    []color.Color
+	cachedBrandRampW   int
+	cachedBrandRampTop color.Color
+	cachedBrandRampBot color.Color
 )
 
 func logoColorRamp() []color.Color {
@@ -37,6 +42,23 @@ func logoColorRamp() []color.Color {
 		cachedLogoRampBot = colLogoBot
 	}
 	return cachedLogoRamp
+}
+
+// brandColorRamp returns a width-wide ramp used to paint the brand row
+// (sunnytui™ … vX.Y.Z) so it shares the same gradient as the SUNNY
+// letters. Cached by (width, top, bot) — invalidates on resize and on
+// palette swap.
+func brandColorRamp(width int) []color.Color {
+	if width < 1 {
+		width = 1
+	}
+	if cachedBrandRamp == nil || cachedBrandRampW != width || cachedBrandRampTop != colLogoTop || cachedBrandRampBot != colLogoBot {
+		cachedBrandRamp = lipgloss.Blend1D(width, colLogoTop, colLogoBot)
+		cachedBrandRampW = width
+		cachedBrandRampTop = colLogoTop
+		cachedBrandRampBot = colLogoBot
+	}
+	return cachedBrandRamp
 }
 
 // renderLogo paints the brand mark with an animated gradient sweep across
@@ -66,14 +88,17 @@ func renderLogo(width int, s Styles, frame int) string {
 	}
 	padStr := strings.Repeat(" ", pad)
 
-	brand := s.LogoBrand.Render("sunnytui™")
-	ver := s.LogoVer.Render("v" + Version)
-	leftW := lipgloss.Width(brand)
-	rightW := lipgloss.Width(ver)
+	brandText := "sunnytui™"
+	verText := "v" + Version
+	leftW := lipgloss.Width(brandText)
+	rightW := lipgloss.Width(verText)
 	gap := width - leftW - rightW
 	if gap < 1 {
 		gap = 1
 	}
+	bramp := brandColorRamp(width)
+	brand := colorizeText(brandText, bramp, 0, lipgloss.NewStyle().Italic(true))
+	ver := colorizeText(verText, bramp, width-rightW, lipgloss.NewStyle())
 	brandRow := brand + strings.Repeat(" ", gap) + ver
 
 	// Build the per-column color ramp by sliding the LogoTop→LogoBot
@@ -134,6 +159,47 @@ func colorizeLetterRow(row string, cols []color.Color) string {
 			j++
 		}
 		b.WriteString(lipgloss.NewStyle().Foreground(c).Render(string(runes[i:j])))
+		i = j
+	}
+	return b.String()
+}
+
+// colorizeText paints each rune of text with ramp[startCol+i], inheriting
+// base (e.g. italic for the brand). Adjacent runes that share the same
+// ramp color get batched into a single Render to keep the escape soup
+// down. Assumes text is single-column-wide runes (true for "sunnytui™"
+// and "vX.Y.Z").
+func colorizeText(text string, ramp []color.Color, startCol int, base lipgloss.Style) string {
+	runes := []rune(text)
+	if len(runes) == 0 || len(ramp) == 0 {
+		return text
+	}
+	var b strings.Builder
+	i := 0
+	for i < len(runes) {
+		col := startCol + i
+		if col < 0 {
+			col = 0
+		}
+		if col >= len(ramp) {
+			col = len(ramp) - 1
+		}
+		c := ramp[col]
+		j := i + 1
+		for j < len(runes) {
+			ncol := startCol + j
+			if ncol < 0 {
+				ncol = 0
+			}
+			if ncol >= len(ramp) {
+				ncol = len(ramp) - 1
+			}
+			if !colorsEqual(ramp[ncol], c) {
+				break
+			}
+			j++
+		}
+		b.WriteString(base.Foreground(c).Render(string(runes[i:j])))
 		i = j
 	}
 	return b.String()

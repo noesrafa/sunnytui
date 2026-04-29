@@ -105,3 +105,18 @@ tail -f ~/.sunnytui/sunnytui.log
 - Cada sesión = su propio `cwd` (Rafael lo pidió explícito). El manager debe aislar working dirs.
 - NO PTY; siempre stream-json. La UI nativa de Claude Code se pelea con cualquier multiplexor.
 - Iteración rápida > ahorrar tokens. Probar contra `claude` real, sin mocks.
+
+## Release flow
+
+**Después de cada cambio que toque comportamiento del binario, soltar release.** No batchear varios cambios en uno; un cambio = un release. Rafael actualiza con `brew update && brew upgrade sunnytui` y prueba enseguida.
+
+Pasos:
+
+1. Bump `Version` en `internal/tui/logo.go` (semver: patch para fixes, minor para features).
+2. `make build && make vet && make test` — debe pasar todo.
+3. Commit (`feat:` / `fix:` / `refactor:` …).
+4. Tag `vX.Y.Z` **idéntico** al `Version` const, luego `git push && git push --tags`.
+5. CI (`.github/workflows/release.yml`) corre GoReleaser → publica GitHub Release y actualiza `noesrafa/homebrew-tap`.
+6. Avisar a Rafael: `brew update && brew upgrade sunnytui` (primera vez: `brew install noesrafa/tap/sunnytui`). Comando en runtime: `sunny` (symlink a `sunnytui`).
+
+**No empujar tags sin el bump del `Version` const** — la UI muestra la versión en el logo y se desincronizaría con el tag.

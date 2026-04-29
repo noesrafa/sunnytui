@@ -82,23 +82,19 @@ func renderTermsSection(paneMgr *terminal.Manager, activePaneActive bool, innerW
 	return rows
 }
 
-// renderUsageSection prefers the statusline snapshot (has percentages,
-// populated when `sunnytui statusline` is registered with Claude Code) and
-// falls back to the rate_limit_event from stream-json (only has status +
-// reset time).
+// renderUsageSection now only surfaces the host machine's cpu/ram. The
+// Claude Code rate-limit bars (5h/7d/ctx) used to live here too but they
+// turned out to be noisy and rarely actionable — Rafael wanted the panel
+// quiet. The buildUsageWidget code path is kept around (dead) in case we
+// want to reintroduce a richer view later.
 func renderUsageSection(mgr *session.Manager, sys sysstats.Stats, innerW int, s Styles) []string {
-	usageRows := buildUsageWidget(mgr, innerW, s)
+	_ = mgr
 	sysRows := buildSysStatsRows(sys, innerW, s)
-	if len(usageRows) == 0 && len(sysRows) == 0 {
+	if len(sysRows) == 0 {
 		return nil
 	}
 	header := sectionHeader("usage", innerW, s)
-	body := append([]string{}, usageRows...)
-	if len(usageRows) > 0 && len(sysRows) > 0 {
-		body = append(body, "") // visual gap between Claude usage and machine usage
-	}
-	body = append(body, sysRows...)
-	return append(header, body...)
+	return append(header, sysRows...)
 }
 
 // buildSysStatsRows renders the whole-machine cpu/ram bars under the
@@ -136,7 +132,6 @@ func renderShortcutsSection(innerW int, s Styles) []string {
 	return []string{
 		s.HeaderSep.Render(strings.Repeat("─", innerW)),
 		s.StatusKey.Render("ctrl+n") + s.Hint.Render(" new chat"),
-		s.StatusKey.Render("ctrl+t") + s.Hint.Render(" new term"),
 		s.StatusKey.Render("ctrl+r") + s.Hint.Render(" rename"),
 		s.StatusKey.Render("ctrl+l") + s.Hint.Render(" reset chat"),
 		s.StatusKey.Render("ctrl+d") + s.Hint.Render(" diff"),
@@ -264,6 +259,47 @@ func renderRateLimitFallback(rl *claude.RateLimitInfo, innerW int, s Styles) []s
 	return rows
 }
 
+// barRamp caches the per-cell Blend1D ramp used by renderProgressBar.
+// Recomputing the ramp + allocating one lipgloss.Style per cell on every
+// sidebar render (the logo tick fires the whole sidebar at ~120ms) was
+// measurably wasteful — the ramp only changes on resize or theme swap.
+var (
+	cachedBarRamp     []lipgloss.Style // pre-styled "━" cells, indexed 0..barW-1
+	cachedBarEmpty    lipgloss.Style   // pre-styled "─" cell
+	cachedBarRampW    int
+	cachedBarRampTop  any // colTertiary at build time — compared by interface identity
+	cachedBarRampBot  any // colDanger at build time
+	cachedBarBorderID any // colBorder at build time (drives the empty cell)
+)
+
+// barCells returns (filled-cell styles indexed 0..w-1, empty-cell style) for
+// the requested bar width. Hits the package-level cache when neither width
+// nor palette has changed.
+func barCells(w int) ([]lipgloss.Style, lipgloss.Style) {
+	if w < 1 {
+		w = 1
+	}
+	if cachedBarRamp != nil &&
+		cachedBarRampW == w &&
+		cachedBarRampTop == colTertiary &&
+		cachedBarRampBot == colDanger &&
+		cachedBarBorderID == colBorder {
+		return cachedBarRamp, cachedBarEmpty
+	}
+	ramp := lipgloss.Blend1D(w, colTertiary, colDanger)
+	cells := make([]lipgloss.Style, w)
+	for i := 0; i < w; i++ {
+		cells[i] = lipgloss.NewStyle().Foreground(ramp[i])
+	}
+	cachedBarRamp = cells
+	cachedBarEmpty = lipgloss.NewStyle().Foreground(colBorder)
+	cachedBarRampW = w
+	cachedBarRampTop = colTertiary
+	cachedBarRampBot = colDanger
+	cachedBarBorderID = colBorder
+	return cachedBarRamp, cachedBarEmpty
+}
+
 // renderProgressBar is the canonical thin one-liner used by every usage
 // metric. Layout:
 //
@@ -304,13 +340,12 @@ func renderProgressBar(label string, pctF float64, reset string, innerW int, s S
 
 	var bar strings.Builder
 	if barW > 0 {
-		ramp := lipgloss.Blend1D(barW, colTertiary, colDanger)
-		emptyStyle := lipgloss.NewStyle().Foreground(colBorder)
+		cells, empty := barCells(barW)
 		for i := 0; i < barW; i++ {
 			if i < filled {
-				bar.WriteString(lipgloss.NewStyle().Foreground(ramp[i]).Render("━"))
+				bar.WriteString(cells[i].Render("━"))
 			} else {
-				bar.WriteString(emptyStyle.Render("─"))
+				bar.WriteString(empty.Render("─"))
 			}
 		}
 	}

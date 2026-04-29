@@ -6,7 +6,7 @@ type KeyMap struct {
 	Send          key.Binding
 	Newline       key.Binding
 	Quit          key.Binding // esc → open quit dialog
-	ClearOrCancel key.Binding // single press: clear input; double press: cancel turn
+	ClearOrCancel key.Binding // ctrl+c: cancel current turn (SIGINT to claude); no-op when idle, never touches the textarea
 	NewSession    key.Binding
 	NextSession   key.Binding
 	PrevSession   key.Binding
@@ -15,7 +15,6 @@ type KeyMap struct {
 	NewConv       key.Binding // ctrl+l — fresh claude conversation in the same session/cwd
 	Diff          key.Binding // ctrl+d — open the git diff viewer
 	Runs          key.Binding // open the runs manager modal
-	NewPane       key.Binding // open the new-terminal-pane dialog
 	TilePicker    key.Binding // ctrl+k — searchable tab switcher
 	Settings      key.Binding // ctrl+s — open settings modal (theme picker)
 	Game          key.Binding // ctrl+g — open minigames modal (snake)
@@ -31,7 +30,7 @@ func DefaultKeyMap() KeyMap {
 		Send:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
 		Newline:       key.NewBinding(key.WithKeys("ctrl+j", "alt+enter"), key.WithHelp("ctrl+j", "newline")),
 		Quit:          key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
-		ClearOrCancel: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "clear/cancel")),
+		ClearOrCancel: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel turn")),
 		NewSession:    key.NewBinding(key.WithKeys("ctrl+n"), key.WithHelp("ctrl+n", "new")),
 		NextSession:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next")),
 		PrevSession:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev")),
@@ -40,7 +39,6 @@ func DefaultKeyMap() KeyMap {
 		NewConv:       key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "reset chat")),
 		Diff:          key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "diff")),
 		Runs:          key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "runs")),
-		NewPane:       key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "new term")),
 		TilePicker:    key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("ctrl+k", "switch tab")),
 		Settings:      key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "settings")),
 		Game:          key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "game")),

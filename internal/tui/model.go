@@ -57,7 +57,6 @@ type Model struct {
 	themeID       string // active theme; persisted in state.json
 	skipPerms     bool
 	lastErr       error
-	lastCtrlC     time.Time
 
 	// chat is the new list-based transcript viewport. It owns the full
 	// drag-to-select-and-copy state machine (multi-click, backward drag,
@@ -83,6 +82,13 @@ type Model struct {
 	// sysStats holds the most recent CPU + RAM sample. Refreshed by a
 	// background tick (sysStatsTickCmd → sysStatsResultMsg).
 	sysStats sysstats.Stats
+
+	// State persistence is debounced: every saveState() call just sets
+	// saveDirty=true; a saveTickCmd flushes to disk at most once every
+	// `saveFlushInterval`. This used to be a per-event MarshalIndent +
+	// atomic rename of the full state.json (~150 KB), which on an active
+	// transcript meant several MB/min of disk writes.
+	saveDirty bool
 }
 
 type Options struct {
@@ -103,9 +109,8 @@ type Options struct {
 const (
 	headerHeight   = 1
 	statusHeight   = 1
-	textareaMinH   = 3
-	textareaMaxH   = 12
-	ctrlCDoubleWin = 1500 * time.Millisecond
+	textareaMinH = 3
+	textareaMaxH = 12
 	// mdCacheMax bounds the markdown render cache. Past this size we drop the
 	// whole map — long sessions otherwise grow it forever.
 	mdCacheMax = 512
@@ -210,7 +215,7 @@ func (m Model) Init() tea.Cmd {
 	// list-based chat is cheap enough now that we don't need to gate the
 	// logo animation on activity — visually you always see the brand mark
 	// breathing.
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd()}
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -492,6 +497,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sysStatsResultMsg:
 		m.sysStats = msg.Stats
 		cmds = append(cmds, sysStatsTickCmd())
+	case saveTickMsg:
+		if m.saveDirty {
+			m.flushState()
+		}
+		cmds = append(cmds, saveTickCmd())
 	}
 
 	if !m.overlay.HasOpen() && !pasteHandled {
@@ -540,6 +550,11 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		m.overlay.CloseTop()
 		return m, nil, true
 	case ConfirmQuitMsg:
+		// Force a synchronous flush so the in-flight draft + transcript
+		// don't get lost to the debounce window.
+		if m.saveDirty {
+			m.flushState()
+		}
 		return m, tea.Quit, true
 	case ConfirmCloseSessionMsg:
 		m.overlay.CloseTop()
@@ -855,8 +870,6 @@ func (m Model) updateKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	switch {
 	case key.Matches(msg, m.keymap.Quit):
 		return m, m.openQuitDialog(), true
-	case key.Matches(msg, m.keymap.NewPane):
-		return m, m.overlay.Open(NewNewPaneDialog(m.initialCwd, m.styles)), true
 	case key.Matches(msg, m.keymap.TilePicker):
 		return m, m.overlay.Open(NewTilePickerDialog(m.collectTiles(), m.styles)), true
 	case key.Matches(msg, m.keymap.Settings):
@@ -977,29 +990,19 @@ func (m *Model) handlePaste() {
 	m.layout()
 }
 
+// handleClearOrCancel: ctrl+c cancels the in-flight claude turn (SIGINT)
+// without touching the textarea draft or attachments — the user pressed
+// it because they changed their mind about the prompt and wants to type
+// a new one. When the session is idle, ctrl+c is a no-op (the user has
+// to clear the textarea explicitly to avoid losing typed text by mistake).
 func (m *Model) handleClearOrCancel() {
-	if !m.lastCtrlC.IsZero() && time.Since(m.lastCtrlC) < ctrlCDoubleWin {
-		// Second press → cancel current turn.
-		m.lastCtrlC = time.Time{}
-		cur := m.manager.Current()
-		if cur != nil && cur.State == session.StateThinking {
-			if err := cur.Cancel(); err != nil {
-				cur.LastErr = err
-			}
-		}
+	cur := m.manager.Current()
+	if cur == nil || cur.State != session.StateThinking {
 		return
 	}
-	// First press → clear textarea, start the double-press timer.
-	m.textarea.Reset()
-	if cur := m.manager.Current(); cur != nil {
-		cur.Draft = ""
-		// Drop any pending pasted images too — their markers vanished with
-		// the textarea reset, so keeping them would only let stale images
-		// resolve into a future message by accident.
-		cur.Attachments = nil
+	if err := cur.Cancel(); err != nil {
+		cur.LastErr = err
 	}
-	m.lastCtrlC = time.Now()
-	m.layout()
 }
 
 func (m *Model) handleCloseTab() {
@@ -1195,11 +1198,14 @@ func (m Model) handleSpinnerTick(msg spinner.TickMsg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// branchTickCmd schedules the next branch poll. Cheap (one `git -C cwd
-// branch --show-current` per session every few seconds), so the input-hint
-// row reflects checkouts done outside the TUI in near real time.
+// branchTickCmd schedules the next branch poll. Each tick fires TWO git
+// subprocesses per session (`branch --show-current` + `status --porcelain`),
+// so on a 4-session setup that's 8 invocations per tick. 15s is the sweet
+// spot: the input-hint row still feels live to the user (checkouts done
+// outside the TUI surface within 15s), and we drop CPU spent in git +
+// fork/exec by ~5×.
 func branchTickCmd() tea.Cmd {
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return branchTickMsg{} })
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg { return branchTickMsg{} })
 }
 
 // logoTickCmd drives the brand-mark gradient sweep. 120ms cadence keeps
@@ -1209,13 +1215,26 @@ func logoTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return logoTickMsg{} })
 }
 
-// sysStatsTickCmd is the metronome for CPU/RAM sampling — 4s cadence
-// keeps the bars feeling live without making `top` a measurable share of
-// our own CPU footprint. Tick → sample → tick is intentionally split
-// across two messages so the actual `top` invocation runs off the main
-// loop.
+// sysStatsTickCmd is the metronome for CPU/RAM sampling. Each tick spawns
+// `top -l 1` (~50ms wall, but a non-trivial fork/exec). 10s cadence keeps
+// the bars looking alive while reducing the per-day invocation count by
+// ~2.5× from the old 4s setting. Tick → sample → tick is intentionally
+// split across two messages so the actual `top` invocation runs off the
+// main loop.
 func sysStatsTickCmd() tea.Cmd {
-	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return sysStatsTickMsg{} })
+	return tea.Tick(10*time.Second, func(time.Time) tea.Msg { return sysStatsTickMsg{} })
+}
+
+// saveFlushInterval bounds how often the dirty state.json gets rewritten.
+// Five seconds is the sweet spot: short enough that a crash loses very
+// little, long enough that an active transcript collapses dozens of
+// per-event saveState() calls into a single MarshalIndent + atomic rename.
+const saveFlushInterval = 5 * time.Second
+
+// saveTickCmd schedules the next state-flush check. The actual write only
+// happens if Model.saveDirty is true at tick time.
+func saveTickCmd() tea.Cmd {
+	return tea.Tick(saveFlushInterval, func(time.Time) tea.Msg { return saveTickMsg{} })
 }
 
 func sysStatsSampleCmd() tea.Cmd {
@@ -1349,7 +1368,7 @@ func (m *Model) welcomeText() string {
 		row("ctrl+d", "ver el diff del repo"),
 		row("tab   ", "cambia entre sesiones"),
 		row("ctrl+w", "cierra la sesión actual"),
-		row("ctrl+c", "limpia el input (×2 cancela el turno)"),
+		row("ctrl+c", "cancela el turno actual (no toca el input)"),
 		row("esc   ", "sale de sunnytui"),
 		"",
 		row("ctrl+j / alt+enter", "nueva línea"),
@@ -1412,10 +1431,14 @@ func (m Model) Run(ctx context.Context) error {
 	}()
 	finalModel, err := p.Run()
 	// Persist before tearing down sessions so we capture the final draft.
+	// We bypass the dirty-bit check here — even if no event marked the
+	// state dirty in the last 5s, we want shutdown to leave a fresh
+	// snapshot on disk (textarea content + active tab index can change
+	// silently without going through saveState()).
 	if fm, ok := finalModel.(Model); ok {
-		fm.saveState()
+		fm.flushStateNow()
 	} else {
-		m.saveState()
+		m.flushStateNow()
 	}
 	if m.manager != nil {
 		m.manager.CloseAll()
@@ -1454,10 +1477,26 @@ func (m Model) pruneOrphanImages() {
 	}
 }
 
-// saveState snapshots EVERYTHING (sessions + panes + active tab) to
-// ~/.sunnytui/state.json. Called once at shutdown so the next run boots back
-// into the same layout.
-func (m Model) saveState() {
+// saveState marks the state as dirty so the next saveTickMsg flushes it.
+// Cheap (no I/O), so it's safe to call from any event handler. The actual
+// disk write happens in flushState().
+func (m *Model) saveState() {
+	m.saveDirty = true
+}
+
+// flushState performs the actual MarshalIndent + atomic rename. Only called
+// from the save tick (debounced) and from the quit path (synchronous, so
+// the user's last actions before exit aren't lost).
+func (m *Model) flushState() {
+	m.saveDirty = false
+	m.flushStateNow()
+}
+
+// flushStateNow snapshots EVERYTHING (sessions + panes + active tab) to
+// ~/.sunnytui/state.json. The body of what used to be saveState — kept
+// pointer-receiver because we briefly mutate the current session's Draft
+// to capture in-flight textarea content.
+func (m *Model) flushStateNow() {
 	if m.manager == nil {
 		return
 	}

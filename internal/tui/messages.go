@@ -45,3 +45,9 @@ type sysStatsTickMsg struct{}
 type sysStatsResultMsg struct {
 	Stats sysstats.Stats
 }
+
+// saveTickMsg fires every saveFlushInterval and flushes the state.json
+// debounce buffer to disk if anything changed since the last write. The
+// granular saveState() calls scattered through Update only mark dirty;
+// this is what actually pays the I/O cost.
+type saveTickMsg struct{}
