@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	sidebarWidth = 30
-	sidebarGap   = 3 // empty cols between sidebar and main column
+	// 33 cols leaves innerW=29 (after the padding-and-safety margin),
+	// which is exactly the width of the new dot-matrix SUNNY block
+	// (5 cols per letter × 5 letters + 4 single-col gaps = 29).
+	sidebarWidth = 33
+	sidebarGap   = 3 // empty cols between main column and sidebar
 )
 
 func renderSidebar(mgr *session.Manager, runMgr *runs.Manager, paneMgr *terminal.Manager, activePaneActive bool, height int, s Styles, logoFrame int, sys sysstats.Stats) string {

@@ -35,9 +35,11 @@ func (m Model) View() tea.View {
 				// "" but `strings.Split("", "\n")` yields [""] — that
 				// becomes one blank row before the body. Account for it
 				// here so the caret lands on the same row as the cell
-				// the child terminal is rendering.
+				// the child terminal is rendering. Main column is now on
+				// the LEFT (sidebar on right), so x is just `cx` — no
+				// horizontal offset to add.
 				v.Cursor = tea.NewCursor(
-					sidebarWidth+sidebarGap+cx,
+					cx,
 					headerHeight+cy,
 				)
 				v.Cursor.Color = colSecondary
@@ -121,10 +123,11 @@ func (m Model) renderBody() string {
 	}
 	main := m.renderMain(bodyH)
 	sidebar := renderSidebar(m.manager, m.runs, m.panes, m.activeKind == activePane, bodyH, m.styles, m.logoFrame, m.sysStats)
-	// 3-col gap between sidebar and main — Crush-style breathing room, no
-	// vertical divider line.
+	// 3-col gap between main and sidebar — Crush-style breathing room, no
+	// vertical divider line. Sidebar sits on the RIGHT (Rafael's preference,
+	// keeps the chat anchored to the left edge where the eye lands first).
 	gap := lipgloss.NewStyle().Width(sidebarGap).Height(bodyH).Render("")
-	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, gap, main)
+	return lipgloss.JoinHorizontal(lipgloss.Top, main, gap, sidebar)
 }
 
 func (m Model) renderMain(height int) string {

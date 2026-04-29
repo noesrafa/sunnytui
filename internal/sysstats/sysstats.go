@@ -1,8 +1,21 @@
-// Package sysstats samples whole-machine CPU + memory usage.
+// Package sysstats samples whole-machine CPU + memory usage in numbers
+// that match macOS Activity Monitor's display.
 //
-// macOS-only today: shells out to `top -l 1 -n 0 -s 0` (one snapshot, no
-// process list, zero settling delay) and parses the summary header. ~50ms
-// per call on an M-series Mac, so a 3-5s tick is plenty cheap.
+// macOS-only today. Two pieces:
+//
+//   - CPU comes from `top -l 2 -n 0 -s 1`. The first sample averages CPU
+//     since boot (useless: a freshly-booted machine reports 0% busy until
+//     the first idle slice elapses; a long-uptime machine reports the
+//     lifetime average), so we always parse the SECOND sample. Cost is
+//     ~1s wall, but Sample() runs in a tea goroutine so the UI doesn't
+//     stall.
+//
+//   - RAM comes from `vm_stat` + `sysctl hw.memsize`. We compute Used =
+//     (active + wired + compressed) × pageSize, matching Activity
+//     Monitor's "Memory Used" definition. The previous implementation
+//     parsed `top`'s "PhysMem used" which lumps in cached/inactive
+//     pages and inflates the percentage by 10-15 pp vs. what the user
+//     sees in Activity Monitor.
 package sysstats
 
 import (
@@ -10,16 +23,20 @@ import (
 	"regexp"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync/atomic"
 )
 
 type Stats struct {
 	CPUPct float64 // 0-100, whole-machine (user + sys)
-	MemPct float64 // 0-100, used / (used + unused)
+	MemPct float64 // 0-100, (active + wired + compressed) / total
 }
 
 var (
-	cpuRE = regexp.MustCompile(`CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,\s+([\d.]+)%\s+idle`)
-	memRE = regexp.MustCompile(`PhysMem:\s+([\d.]+)([KMGTB])\s+used.*?,\s+([\d.]+)([KMGTB])\s+unused`)
+	cpuRE     = regexp.MustCompile(`CPU usage:\s+([\d.]+)%\s+user,\s+([\d.]+)%\s+sys,\s+([\d.]+)%\s+idle`)
+	pageSzRE  = regexp.MustCompile(`page size of (\d+) bytes`)
+	pageStRE  = regexp.MustCompile(`Pages\s+([^:]+):\s+(\d+)\.`)
+	totalMem  atomic.Uint64 // cached hw.memsize — never changes during a run
 )
 
 // Sample reads one CPU/RAM snapshot. Returns zero-valued Stats with no
@@ -29,44 +46,87 @@ func Sample() (Stats, error) {
 	if runtime.GOOS != "darwin" {
 		return Stats{}, nil
 	}
-	out, err := exec.Command("top", "-l", "1", "-n", "0", "-s", "0").Output()
-	if err != nil {
-		return Stats{}, err
-	}
-	return parse(string(out)), nil
-}
-
-func parse(s string) Stats {
 	var st Stats
-	if m := cpuRE.FindStringSubmatch(s); len(m) == 4 {
-		// Idle is the most stable signal — derive busy as 100 - idle so
-		// "user + sys + idle = 100%" rounding errors don't show up.
-		idle, _ := strconv.ParseFloat(m[3], 64)
-		st.CPUPct = 100 - idle
+
+	if out, err := exec.Command("top", "-l", "2", "-n", "0", "-s", "1").Output(); err == nil {
+		st.CPUPct = parseCPU(string(out))
 	}
-	if m := memRE.FindStringSubmatch(s); len(m) == 5 {
-		used, _ := strconv.ParseFloat(m[1], 64)
-		used *= unitMul(m[2])
-		unused, _ := strconv.ParseFloat(m[3], 64)
-		unused *= unitMul(m[4])
-		total := used + unused
-		if total > 0 {
-			st.MemPct = used / total * 100
+
+	if out, err := exec.Command("vm_stat").Output(); err == nil {
+		if total := totalMemBytes(); total > 0 {
+			st.MemPct = parseMemPct(string(out), total)
 		}
 	}
-	return st
+
+	return st, nil
 }
 
-func unitMul(u string) float64 {
-	switch u {
-	case "K":
-		return 1024
-	case "M":
-		return 1024 * 1024
-	case "G":
-		return 1024 * 1024 * 1024
-	case "T":
-		return 1024 * 1024 * 1024 * 1024
+// parseCPU pulls the LAST "CPU usage:" line from top output (the second of
+// two samples), and derives busy% as 100 - idle%. Idle is the most stable
+// signal — using it avoids user+sys+idle rounding errors creeping in.
+func parseCPU(s string) float64 {
+	all := cpuRE.FindAllStringSubmatch(s, -1)
+	if len(all) == 0 {
+		return 0
 	}
-	return 1
+	m := all[len(all)-1]
+	idle, _ := strconv.ParseFloat(m[3], 64)
+	pct := 100 - idle
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// parseMemPct scans `vm_stat` output for the per-page counters and computes
+// Used = (active + wired down + occupied by compressor) × pageSize. That
+// matches Activity Monitor's "Memory Used" definition (App Memory + Wired
+// + Compressed). Cached files / inactive / speculative pages are
+// reclaimable on demand and so are EXCLUDED, same as Activity Monitor.
+func parseMemPct(s string, totalBytes uint64) float64 {
+	pageSize := uint64(4096)
+	if m := pageSzRE.FindStringSubmatch(s); len(m) == 2 {
+		if ps, err := strconv.ParseUint(m[1], 10, 64); err == nil && ps > 0 {
+			pageSize = ps
+		}
+	}
+	pages := map[string]uint64{}
+	for _, m := range pageStRE.FindAllStringSubmatch(s, -1) {
+		key := strings.ToLower(strings.TrimSpace(m[1]))
+		v, _ := strconv.ParseUint(m[2], 10, 64)
+		pages[key] = v
+	}
+	used := pages["active"] + pages["wired down"] + pages["occupied by compressor"]
+	if used == 0 || totalBytes == 0 {
+		return 0
+	}
+	pct := float64(used*pageSize) / float64(totalBytes) * 100
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// totalMemBytes returns hw.memsize, cached after the first successful read
+// (the value never changes for a running kernel).
+func totalMemBytes() uint64 {
+	if v := totalMem.Load(); v != 0 {
+		return v
+	}
+	out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil || v == 0 {
+		return 0
+	}
+	totalMem.Store(v)
+	return v
 }

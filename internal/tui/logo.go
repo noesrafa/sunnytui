@@ -7,18 +7,32 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.9.0"
+const Version = "0.10.0"
 
-// Block-art SUNNY: 5 letters × 4 cols × 5 rows + 1-col gaps = 24 cols wide.
+// Dot-matrix SUNNY: each letter is a 5×5 logical pixel grid where every
+// "pixel" is half a terminal cell tall. We pack two logical rows into one
+// terminal row using ▀ (top half), ▄ (bottom half), and █ (both) so a
+// terminal cell ≈ a square dot in display pixels (terminal cells are 1:2
+// W:H, half-blocks are 1:1). 5 logical rows pack into 3 terminal rows
+// (rows 1+2, 3+4, 5+empty); 5 letters × 5 cols + 4 single-col gaps = 29.
+//
+// Logical grid for reference:
+//
+//	S       U       N       Y
+//	 ████   █   █   █   █   █   █
+//	 █      █   █   ██  █   .█.█.
+//	 ████   █   █   █ █ █   ..█..
+//	    █   █   █   █  ██   ..█..
+//	 ████   .███.   █   █   ..█..
+//
+// (Y is centred via the joint going █...█ → .█.█. → ..█.. → ..█.. → ..█..)
 var sunnyBlock = []string{
-	"████ █  █ █  █ █  █ █  █",
-	"█    █  █ ██ █ ██ █  ██ ",
-	"████ █  █ █ ██ █ ██   █ ",
-	"   █ █  █ █  █ █  █   █ ",
-	"████ ████ █  █ █  █   █ ",
+	"▄▀▀▀▀ █   █ █▄  █ █▄  █ ▀▄ ▄▀",
+	" ▀▀▀▄ █   █ █ ▀▄█ █ ▀▄█   █  ",
+	"▀▀▀▀   ▀▀▀  ▀   ▀ ▀   ▀   ▀  ",
 }
 
-const logoBlockW = 24
+const logoBlockW = 29
 
 // Logo gradient ramp cache. The ramp itself is identical every frame —
 // only the per-column phase shifts — so recomputing Blend1D on each tick

@@ -278,7 +278,12 @@ func (l *List) VisibleItemIndices() (startIdx, endIdx int) {
 // Render renders the list and returns the visible lines.
 func (l *List) Render() string {
 	if len(l.items) == 0 {
-		return ""
+		// Even with no items, fill the allocated height so callers can
+		// pin a sibling (input box) to the bottom without it floating up.
+		if l.height <= 0 {
+			return ""
+		}
+		return strings.Repeat("\n", l.height-1)
 	}
 
 	var lines []string
@@ -323,6 +328,14 @@ func (l *List) Render() string {
 
 	if len(lines) > l.height {
 		lines = lines[:l.height]
+	}
+	// Pad to the allocated height so callers can stack siblings below the
+	// list (e.g. the chat input box) and have those land at the bottom of
+	// the screen instead of floating mid-frame when the transcript is
+	// short. Padding goes BEFORE reverse so reverse-mode lists end up with
+	// their empty rows at the top (visually: content sticks to the bottom).
+	for len(lines) < l.height {
+		lines = append(lines, "")
 	}
 
 	if l.reverse {

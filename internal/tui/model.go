@@ -391,8 +391,11 @@ func (m *Model) setFlatTabIndex(i int) {
 // inChatRegion reports whether (x, y) in screen coords lies inside the chat
 // list. Used to gate mouse events at the parent before forwarding into the
 // chatModel — keeps drag-to-select from firing on the sidebar / textarea.
+// Main column is on the LEFT now (sidebar moved to the right), so the chat
+// spans columns [0, mainW) and the sidebar+gap occupy [mainW, m.width).
 func (m Model) inChatRegion(x, y int) bool {
-	if x < sidebarWidth+sidebarGap || x >= m.width {
+	mainW := m.width - sidebarWidth - sidebarGap
+	if x < 0 || x >= mainW {
 		return false
 	}
 	if y < headerHeight {
@@ -406,9 +409,10 @@ func (m Model) inChatRegion(x, y int) bool {
 
 // screenToChat maps screen coords into the chat list's local coords (origin
 // at the chat's top-left). Returns negative values when outside the chat,
-// callers may clamp as needed for drag-past-edges behavior.
+// callers may clamp as needed for drag-past-edges behavior. With the main
+// column anchored to x=0 there's no horizontal offset to subtract.
 func (m Model) screenToChat(x, y int) (int, int) {
-	return x - sidebarWidth - sidebarGap, y - headerHeight
+	return x, y - headerHeight
 }
 
 // anyRunRunning is true while at least one registered run has its child
