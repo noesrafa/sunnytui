@@ -132,19 +132,23 @@ func renderRunsSection(runMgr *runs.Manager, innerW int, s Styles) []string {
 }
 
 func renderShortcutsSection(innerW int, s Styles) []string {
+	// Whole row in `colMuted` (no bold, no italic) so the shortcuts read
+	// as a quiet reference panel instead of competing for attention with
+	// the active session/run/usage rows above.
+	g := s.HeaderDim
 	return []string{
 		s.HeaderSep.Render(strings.Repeat("─", innerW)),
-		s.StatusKey.Render("ctrl+n") + s.Hint.Render(" new chat"),
-		s.StatusKey.Render("ctrl+r") + s.Hint.Render(" rename"),
-		s.StatusKey.Render("ctrl+l") + s.Hint.Render(" reset chat"),
-		s.StatusKey.Render("ctrl+d") + s.Hint.Render(" diff"),
-		s.StatusKey.Render("ctrl+u") + s.Hint.Render(" runs"),
-		s.StatusKey.Render("ctrl+k") + s.Hint.Render(" switch"),
-		s.StatusKey.Render("ctrl+s") + s.Hint.Render(" settings"),
-		s.StatusKey.Render("end") + s.Hint.Render("    bottom"),
-		s.StatusKey.Render("tab") + s.Hint.Render("    next"),
-		s.StatusKey.Render("ctrl+w") + s.Hint.Render(" close"),
-		s.StatusKey.Render("esc") + s.Hint.Render("    quit"),
+		g.Render("ctrl+n  new chat"),
+		g.Render("ctrl+r  rename"),
+		g.Render("ctrl+l  reset chat"),
+		g.Render("ctrl+d  diff"),
+		g.Render("ctrl+u  runs"),
+		g.Render("ctrl+k  switch"),
+		g.Render("ctrl+s  settings"),
+		g.Render("end     bottom"),
+		g.Render("tab     next"),
+		g.Render("ctrl+w  close"),
+		g.Render("esc     quit"),
 	}
 }
 

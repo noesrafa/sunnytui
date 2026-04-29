@@ -35,11 +35,10 @@ func (m Model) View() tea.View {
 				// "" but `strings.Split("", "\n")` yields [""] — that
 				// becomes one blank row before the body. Account for it
 				// here so the caret lands on the same row as the cell
-				// the child terminal is rendering. Main column is now on
-				// the LEFT (sidebar on right), so x is just `cx` — no
-				// horizontal offset to add.
+				// the child terminal is rendering. The main column starts
+				// at x=mainPadLeft (the left gutter), so add that offset.
 				v.Cursor = tea.NewCursor(
-					cx,
+					mainPadLeft+cx,
 					headerHeight+cy,
 				)
 				v.Cursor.Color = colSecondary
@@ -131,14 +130,17 @@ func (m Model) renderBody() string {
 }
 
 func (m Model) renderMain(height int) string {
-	mainW := m.width - sidebarWidth - sidebarGap
+	mainW := m.width - sidebarWidth - sidebarGap - mainPadLeft
 	if mainW < 20 {
 		mainW = 20
 	}
+	// outerW is the full slot the main column occupies in the body row;
+	// inner content uses mainW and the PaddingLeft eats the gutter.
+	outerW := mainW + mainPadLeft
 
 	// Pane mode: full main column is the vt10x grid.
 	if p := m.activePane(); p != nil {
-		return lipgloss.NewStyle().Width(mainW).Height(height).Render(terminal.Render(p))
+		return lipgloss.NewStyle().Width(outerW).Height(height).PaddingLeft(mainPadLeft).Render(terminal.Render(p))
 	}
 
 	// Claude session mode: transcript + (gap) + input + hint. The blank
@@ -152,7 +154,7 @@ func (m Model) renderMain(height int) string {
 	hint := m.renderInputHint()
 	gap := strings.Repeat("\n", inputTopGap-1)
 	body := lipgloss.JoinVertical(lipgloss.Left, transcript, gap, input, hint)
-	return lipgloss.NewStyle().Width(mainW).Height(height).Render(body)
+	return lipgloss.NewStyle().Width(outerW).Height(height).PaddingLeft(mainPadLeft).Render(body)
 }
 
 func (m Model) renderInput(cur *session.Session) string {
@@ -160,7 +162,7 @@ func (m Model) renderInput(cur *session.Session) string {
 	if cur != nil && cur.State == session.StateIdle {
 		style = m.styles.InputFocused
 	}
-	mainW := m.width - sidebarWidth - sidebarGap
+	mainW := m.width - sidebarWidth - sidebarGap - mainPadLeft
 	return style.Width(mainW).Render(m.textarea.View())
 }
 

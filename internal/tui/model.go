@@ -111,6 +111,11 @@ const (
 	statusHeight   = 1
 	textareaMinH = 3
 	textareaMaxH = 12
+	// mainPadLeft adds breathing room between the chat / input and the
+	// terminal's left edge. Rendered as PaddingLeft on the main column's
+	// outer container; every "content width" calculation subtracts it so
+	// nothing overflows.
+	mainPadLeft = 2
 	// mdCacheMax bounds the markdown render cache. Past this size we drop the
 	// whole map — long sessions otherwise grow it forever.
 	mdCacheMax = 512
@@ -258,7 +263,7 @@ func (m Model) anyThinking() bool {
 // paneSize returns the (cols, rows) the active pane should occupy in the
 // main column when it is the visible tab.
 func (m Model) paneSize() (int, int) {
-	w := m.width - sidebarWidth - sidebarGap
+	w := m.width - sidebarWidth - sidebarGap - mainPadLeft
 	if w < 20 {
 		w = 20
 	}
@@ -391,11 +396,11 @@ func (m *Model) setFlatTabIndex(i int) {
 // inChatRegion reports whether (x, y) in screen coords lies inside the chat
 // list. Used to gate mouse events at the parent before forwarding into the
 // chatModel — keeps drag-to-select from firing on the sidebar / textarea.
-// Main column is on the LEFT now (sidebar moved to the right), so the chat
-// spans columns [0, mainW) and the sidebar+gap occupy [mainW, m.width).
+// The chat content sits at x=mainPadLeft (the left gutter) and runs for
+// the inner main width; sidebar + gap occupy the rest.
 func (m Model) inChatRegion(x, y int) bool {
-	mainW := m.width - sidebarWidth - sidebarGap
-	if x < 0 || x >= mainW {
+	mainW := m.width - sidebarWidth - sidebarGap - mainPadLeft
+	if x < mainPadLeft || x >= mainPadLeft+mainW {
 		return false
 	}
 	if y < headerHeight {
@@ -409,10 +414,11 @@ func (m Model) inChatRegion(x, y int) bool {
 
 // screenToChat maps screen coords into the chat list's local coords (origin
 // at the chat's top-left). Returns negative values when outside the chat,
-// callers may clamp as needed for drag-past-edges behavior. With the main
-// column anchored to x=0 there's no horizontal offset to subtract.
+// callers may clamp as needed for drag-past-edges behavior. The chat starts
+// at x=mainPadLeft (the left gutter), so we subtract the gutter to get the
+// chat-local x.
 func (m Model) screenToChat(x, y int) (int, int) {
-	return x, y - headerHeight
+	return x - mainPadLeft, y - headerHeight
 }
 
 // anyRunRunning is true while at least one registered run has its child
@@ -1286,7 +1292,7 @@ func (m Model) openQuitDialog() tea.Cmd {
 }
 
 func (m *Model) layout() {
-	mainW := m.width - sidebarWidth - sidebarGap
+	mainW := m.width - sidebarWidth - sidebarGap - mainPadLeft
 	if mainW < 20 {
 		mainW = 20
 	}
