@@ -13,56 +13,62 @@ import (
 // is sized to grow into multiple sections later (model defaults, keymap,
 // etc.) without redesigning the dialog.
 //
-// Theme rows are organized into three groups: an Auto entry at the top
-// (follows the terminal background), then all dark themes, then all light
-// themes. Section labels render between groups but are not selectable —
-// the cursor is an index into the flat `entries` slice we build at open
-// time, so navigation transparently skips over decorations.
+// Themes ship paired (a dark + a light Palette per flavor) and ResolveTheme
+// auto-flips at runtime based on the terminal background. The picker
+// renders ONE row per flavor — the dark canonical — and the swatches
+// reflect whatever Palette is actually live right now (so on a light
+// terminal you preview light swatches). Users pick a vibe, not a polarity.
 type SettingsDialog struct {
-	styles  Styles
-	current string         // active theme id at open time, used to mark "(actual)"
-	cursor  int            // index into entries
-	entries []themeEntry   // flat list of selectable rows (id + Theme)
+	styles    Styles
+	current   string         // active theme id at open time, used to mark "(actual)"
+	cursor    int            // index into entries
+	entries   []themeEntry   // flat list of selectable rows (canonical dark id per flavor)
+	bgIsLight bool           // most recent bg reading; drives swatch palette per row
 }
 
-// themeEntry is a row in the picker. The Auto row has theme.ID == ""
-// because there is no concrete Theme behind it — the swatches come from
-// whichever default flavor Auto resolves to today.
+// themeEntry is a row in the picker. id is always the dark canonical id
+// for the flavor — ResolveTheme will swap to the light pair at runtime
+// when bg flips.
 type themeEntry struct {
-	id    string // selection id passed back via Apply/Preview msgs (may be AutoThemeID)
-	theme Theme  // concrete theme used for the swatches & subtitle
+	id    string // dark canonical id passed back via Apply/Preview msgs
+	theme Theme  // dark Theme used for the row name
 }
 
-func NewSettingsDialog(currentThemeID string, s Styles) *SettingsDialog {
+// NewSettingsDialog wires the picker. bgIsLight is the most recent bg
+// reading so the swatches accurately preview what each flavor will look
+// like on the user's current terminal.
+func NewSettingsDialog(currentThemeID string, bgIsLight bool, s Styles) *SettingsDialog {
 	entries := buildThemeEntries()
 	cursor := 0
 	for i, e := range entries {
-		if e.id == currentThemeID {
+		// Match either the dark canonical or its light pair so the cursor
+		// lands on the correct flavor regardless of which polarity is
+		// currently persisted.
+		if e.id == currentThemeID || e.theme.PairID == currentThemeID {
 			cursor = i
 			break
 		}
 	}
-	return &SettingsDialog{styles: s, current: currentThemeID, cursor: cursor, entries: entries}
+	return &SettingsDialog{
+		styles:    s,
+		current:   currentThemeID,
+		cursor:    cursor,
+		entries:   entries,
+		bgIsLight: bgIsLight,
+	}
 }
 
-// buildThemeEntries flattens the Themes catalog into the order shown in
-// the picker: Auto, then every dark theme, then every light theme.
-// Section labels are rendered separately by View().
+// buildThemeEntries flattens the Themes catalog into one row per flavor.
+// We pick the dark canonical (Light=false) as the row id; light pairs
+// are skipped because ResolveTheme handles polarity at apply time.
+// Dark themes without a PairID still get a row (they just won't flip).
 func buildThemeEntries() []themeEntry {
-	out := make([]themeEntry, 0, len(Themes)+1)
-	// Auto first. We render its swatches using the dark default so users
-	// see "Charple-ish" colors (the brand mark) without having to know
-	// what their bg is right now.
-	out = append(out, themeEntry{id: AutoThemeID, theme: ThemeByID(AutoDarkDefaultID)})
-	for _, t := range Themes {
-		if !t.Light {
-			out = append(out, themeEntry{id: t.ID, theme: t})
-		}
-	}
+	out := make([]themeEntry, 0, len(Themes))
 	for _, t := range Themes {
 		if t.Light {
-			out = append(out, themeEntry{id: t.ID, theme: t})
+			continue
 		}
+		out = append(out, themeEntry{id: t.ID, theme: t})
 	}
 	return out
 }
@@ -123,44 +129,31 @@ func (d *SettingsDialog) View(width, _ int) string {
 	var rows []string
 	rows = append(rows, title, "", header, rule)
 
-	// Walk entries in their flat order, inserting visual section labels
-	// when the group changes. We don't change indices — cursor still
-	// points into d.entries.
-	prevGroup := ""
 	for i, e := range d.entries {
-		group := groupOf(e)
-		if group != prevGroup {
-			if i > 0 {
-				rows = append(rows, "")
-			}
-			rows = append(rows, d.styles.Hint.Render(group))
-			prevGroup = group
-		}
-		rows = append(rows, d.renderRow(e, i == d.cursor, e.id == d.current, innerW))
+		rows = append(rows, d.renderRow(e, i == d.cursor, d.isCurrent(e), innerW))
 	}
 
+	footer := d.styles.Hint.Render("todos siguen el bg del terminal automáticamente")
 	hint := d.styles.Hint.Render("↑↓ navegar · enter aplicar · esc cerrar")
-	rows = append(rows, "", hint)
+	rows = append(rows, "", footer, "", hint)
 
 	return d.styles.DialogBox.Width(boxW).Render(strings.Join(rows, "\n"))
 }
 
-// groupOf returns the section heading for an entry. Auto is its own
-// group so it visually sits apart from the explicit picks.
-func groupOf(e themeEntry) string {
-	switch {
-	case e.id == AutoThemeID:
-		return "auto"
-	case e.theme.Light:
-		return "light"
-	default:
-		return "dark"
+// isCurrent matches the row against the persisted theme id, treating a
+// light pair as equivalent to its dark canonical so the "(actual)" tag
+// stays attached to the right flavor across bg flips.
+func (d *SettingsDialog) isCurrent(e themeEntry) bool {
+	if e.id == d.current {
+		return true
 	}
+	return e.theme.PairID != "" && e.theme.PairID == d.current
 }
 
-// renderRow draws one option: a cursor caret, the theme name (or Auto
-// label), an "(actual)" marker on the active one, and a strip of color
-// swatches so the user can preview the palette without applying.
+// renderRow draws one option: a cursor caret, the flavor name, an
+// "(actual)" marker on the active one, and a strip of color swatches
+// rendered from whichever Palette would actually apply right now (the
+// dark Palette on a dark terminal, the light Palette on a light one).
 func (d *SettingsDialog) renderRow(e themeEntry, focused, active bool, innerW int) string {
 	caret := "  "
 	nameStyle := d.styles.AssistantText
@@ -169,18 +162,18 @@ func (d *SettingsDialog) renderRow(e themeEntry, focused, active bool, innerW in
 		nameStyle = d.styles.AssistantText.Bold(true)
 	}
 
-	name := e.theme.Name
-	if e.id == AutoThemeID {
-		name = "Auto (sigue terminal)"
-	}
-
 	tag := ""
 	if active {
 		tag = " " + d.styles.Hint.Render("(actual)")
 	}
 
-	swatches := buildSwatches(e.theme.P)
-	leftPart := caret + nameStyle.Render(name) + tag
+	// Resolve the flavor against the current bg so swatches match what
+	// the user would see if they applied this row. ResolveTheme handles
+	// the dark→light swap when PairID exists.
+	livePalette := ResolveTheme(e.id, d.bgIsLight).P
+	swatches := buildSwatches(livePalette)
+
+	leftPart := caret + nameStyle.Render(e.theme.Name) + tag
 	pad := innerW - lipgloss.Width(leftPart) - lipgloss.Width(swatches)
 	if pad < 1 {
 		pad = 1

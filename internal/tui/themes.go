@@ -65,27 +65,29 @@ const (
 	AutoLightDefaultID = "charple-light"
 )
 
-// Themes is the curated list, in display order. The first entry is the
-// default for fresh installs. Each theme aims for a different *mood* so
-// users have real choice (not just hue rotations of the same palette):
+// Themes is the curated list, in display order. Every flavor ships with
+// both a dark and a light Palette and they are paired via PairID so
+// ResolveTheme can flip them based on the terminal background. The
+// settings dialog renders one row per *flavor* (the dark canonical),
+// not one row per Palette — users pick a vibe, not a polarity.
 //
-//   - Charple Dark / Light — vibrant electric, paired
-//   - Sunset Dark / Light  — warm romantic, paired
-//   - Tokyo Night          — cool moody (dark only)
-//   - Synthwave            — neon party (dark only)
-//   - Fallout              — Pip-Boy CRT (dark only)
-//   - Whisper Dark / Light — quiet mono gray, paired
+//   - Charple        — vibrant electric (default)
+//   - Sunset         — warm romantic
+//   - Tokyo Night    — cool moody, blue/violet/cyan band
+//   - Synthwave      — neon party
+//   - Fallout        — Pip-Boy CRT, monochrome green discipline
+//   - Whisper        — quiet mono gray, almost no color
 //
 // Constraints applied to every entry:
 //   - Primary, Secondary, Tertiary, Accent are visually distinct hues so
 //     the spinner / cursor / focus underline don't collapse together.
 //   - Success/Warning/Danger keep semantic meaning regardless of the rest.
-//   - On light themes, Primary/Secondary are deepened so OnAccent=#FFFFFF
-//     reads cleanly when used as a button foreground.
+//   - Light variants deepen Primary/Secondary so OnAccent=#FFFFFF reads
+//     cleanly when used as a button foreground.
 var Themes = []Theme{
 	{
 		ID:     "charple-dark",
-		Name:   "Charple Dark",
+		Name:   "Charple",
 		PairID: "charple-light",
 		P: Palette{
 			Primary:   hex("#6B50FF"), // Charple purple
@@ -130,7 +132,7 @@ var Themes = []Theme{
 	},
 	{
 		ID:     "sunset-dark",
-		Name:   "Sunset Dark",
+		Name:   "Sunset",
 		PairID: "sunset-light",
 		P: Palette{
 			Primary:   hex("#F97316"), // orange
@@ -179,8 +181,16 @@ var Themes = []Theme{
 		// without breaking the cool-blue mood. Border is barely visible
 		// against a dark terminal — the negative space carries the work
 		// instead of competing rules.
-		ID:   "tokyo-night",
-		Name: "Tokyo Night",
+		// Premium / monochromatic-blue feel: every accent sits in the
+		// blue→violet→cyan band so the UI reads as one cohesive palette.
+		// Success/Warning/Danger are pulled toward the same value range
+		// (muted teal, brushed gold, dusty rose) so they signal clearly
+		// without breaking the cool-blue mood. Border is barely visible
+		// against a dark terminal — the negative space carries the work
+		// instead of competing rules.
+		ID:     "tokyo-night",
+		Name:   "Tokyo Night",
+		PairID: "tokyo-night-light",
 		P: Palette{
 			Primary:   hex("#7AA2F7"), // soft blue
 			Secondary: hex("#BB9AF7"), // violet (cursor)
@@ -199,8 +209,35 @@ var Themes = []Theme{
 		},
 	},
 	{
-		ID:   "synthwave",
-		Name: "Synthwave",
+		// Tokyo Night Day: the blue/violet/cyan band, but every accent
+		// deepened so it reads on a near-white terminal. Body text is the
+		// canonical Tokyo Day navy (#3760BF) — keeps the palette feeling
+		// "Tokyo Night" instead of generic light.
+		ID:     "tokyo-night-light",
+		Name:   "Tokyo Night Light",
+		Light:  true,
+		PairID: "tokyo-night",
+		P: Palette{
+			Primary:   hex("#2E7DE9"), // deep Tokyo blue
+			Secondary: hex("#9854F1"), // deep violet
+			Tertiary:  hex("#007197"), // deep cyan
+			Accent:    hex("#5C30C2"), // royal violet
+			Success:   hex("#587539"), // sage
+			Warning:   hex("#8C6C3E"), // brushed gold, deepened
+			Danger:    hex("#C64343"), // rust red
+			Muted:     hex("#687387"), // medium blue-gray
+			Text:      hex("#3760BF"), // Tokyo Day navy body copy
+			Border:    hex("#C1C2CE"), // soft blue-gray rule
+			OnAccent:  hex("#FFFFFF"),
+			LogoTop:   hex("#9854F1"),
+			LogoBot:   hex("#2E7DE9"),
+			LogoVer:   hex("#007197"),
+		},
+	},
+	{
+		ID:     "synthwave",
+		Name:   "Synthwave",
+		PairID: "synthwave-light",
 		P: Palette{
 			Primary:   hex("#FF7EDB"), // neon pink
 			Secondary: hex("#FF6EC7"), // hot magenta (cursor)
@@ -219,14 +256,40 @@ var Themes = []Theme{
 		},
 	},
 	{
+		// Synthwave Daylight: same neon DNA (pink → magenta → cyan)
+		// punched down a couple of stops so it pops on white. Borders
+		// are barely-there pink so panel rules don't lose the vibe.
+		ID:     "synthwave-light",
+		Name:   "Synthwave Light",
+		Light:  true,
+		PairID: "synthwave",
+		P: Palette{
+			Primary:   hex("#C026D3"), // deep neon pink
+			Secondary: hex("#BE185D"), // deep magenta
+			Tertiary:  hex("#0891B2"), // deep cyan
+			Accent:    hex("#6D28D9"), // electric lavender
+			Success:   hex("#047857"), // deep mint
+			Warning:   hex("#B45309"), // deep canary-gold
+			Danger:    hex("#BE123C"), // signal red, deepened
+			Muted:     hex("#71717A"),
+			Text:      hex("#18181B"), // near-black
+			Border:    hex("#F0ABFC"), // pale pink rule keeps the synth vibe
+			OnAccent:  hex("#FFFFFF"),
+			LogoTop:   hex("#C026D3"),
+			LogoBot:   hex("#0891B2"),
+			LogoVer:   hex("#B45309"),
+		},
+	},
+	{
 		// Pip-Boy 3000: full phosphor green monochrome on near-black. The
 		// real Pip-Boy is a single-channel CRT — every glyph is the same
 		// phosphor, only the brightness/saturation varies. We mirror that:
 		// every accent sits in the green band, no amber rescue color. The
 		// logo sweeps from a brighter scanline tip into deep phosphor for
 		// that "RobCo terminal warming up" look.
-		ID:   "fallout",
-		Name: "Fallout (Pip-Boy)",
+		ID:     "fallout",
+		Name:   "Fallout",
+		PairID: "fallout-light",
 		P: Palette{
 			Primary:   hex("#33FF66"), // pure phosphor green
 			Secondary: hex("#7FFFA0"), // brighter scanline lime (cursor)
@@ -245,13 +308,40 @@ var Themes = []Theme{
 		},
 	},
 	{
+		// Fallout Light: same monochrome-green discipline (no rescue
+		// color, danger stays in-band) but inverted — deep forest greens
+		// on a near-white "lab terminal" rather than a CRT. The brand
+		// rule still applies: every accent sits in the green band, so
+		// the UI reads as one phosphor regardless of polarity.
+		ID:     "fallout-light",
+		Name:   "Fallout Light",
+		Light:  true,
+		PairID: "fallout",
+		P: Palette{
+			Primary:   hex("#15803D"), // deep forest green
+			Secondary: hex("#166534"), // darker forest (cursor)
+			Tertiary:  hex("#16A34A"), // vivid green (focused prompt)
+			Accent:    hex("#14532D"), // very dark green (tools)
+			Success:   hex("#15803D"),
+			Warning:   hex("#65A30D"), // lime warning — still in-band
+			Danger:    hex("#166534"), // dark green errors — Pip-Boy never breaks the palette
+			Muted:     hex("#4D7C0F"), // olive
+			Text:      hex("#052E16"), // near-black green body copy
+			Border:    hex("#BBF7D0"), // pale green rule
+			OnAccent:  hex("#F0FDF4"), // off-white reads on the deep forest Primary
+			LogoTop:   hex("#16A34A"), // bright tip
+			LogoBot:   hex("#14532D"), // deep base
+			LogoVer:   hex("#15803D"),
+		},
+	},
+	{
 		// Whisper Dark: deliberately quiet light-on-dark monochrome.
 		// Every accent is a different value of cool gray, with one
 		// warm-white as Primary so the cursor and key ticks still pop.
 		// Errors are the only break: a desaturated rust so they read as
 		// "wrong" without nuking the calm.
 		ID:     "whisper",
-		Name:   "Whisper Dark (Mono)",
+		Name:   "Whisper",
 		PairID: "whisper-light",
 		P: Palette{
 			Primary:   hex("#F5F5F5"), // near-white
@@ -311,20 +401,25 @@ func ThemeByID(id string) Theme {
 }
 
 // ResolveTheme returns the concrete theme to apply given a user-selected
-// id and the most recent terminal-background reading. It exists so callers
-// don't have to special-case AutoThemeID at every site:
+// id and the most recent terminal-background reading. Every paired theme
+// auto-flips to its counterpart when the bg polarity doesn't match —
+// Auto isn't a special id anymore, it's the default behavior.
 //
-//   - id == AutoThemeID → pick the dark/light Charple variant by bg
-//   - any other id → look it up directly
+//   - id == AutoThemeID (legacy state.json) → resolve as Charple
+//   - any other id → look up, then swap to PairID if polarity mismatches
 //
 // bgIsLight defaults to false when no BackgroundColorMsg has arrived yet,
-// so Auto on an unknown terminal lands on the dark variant.
+// so an unknown terminal lands on the dark variant of whatever flavor
+// the user picked.
 func ResolveTheme(id string, bgIsLight bool) Theme {
 	if id == AutoThemeID {
-		if bgIsLight {
-			return ThemeByID(AutoLightDefaultID)
-		}
-		return ThemeByID(AutoDarkDefaultID)
+		// Legacy: state.json from v0.11.x persisted "auto". Map it to
+		// the Charple flavor; the polarity swap below handles bg.
+		id = AutoDarkDefaultID
 	}
-	return ThemeByID(id)
+	t := ThemeByID(id)
+	if t.PairID != "" && bgIsLight != t.Light {
+		return ThemeByID(t.PairID)
+	}
+	return t
 }
