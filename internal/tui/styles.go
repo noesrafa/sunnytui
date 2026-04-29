@@ -9,10 +9,12 @@ import (
 )
 
 // Fixed-palette colors. We avoid lipgloss.AdaptiveColor on purpose because
-// adaptive colors trigger an OSC 11 query at runtime to detect the
-// terminal background; that query's response was leaking back into the
-// textarea on terminals that don't immediately drain it. Hardcoded colors
-// remove the trigger entirely.
+// adaptive colors trigger a synchronous OSC 11 query from inside lipgloss
+// at runtime to detect the terminal background; that query's response was
+// leaking back into the textarea on terminals that don't immediately
+// drain it. Instead the model asks bubbletea for the background via
+// tea.RequestBackgroundColor — bubbletea's input parser owns the response
+// and surfaces it as tea.BackgroundColorMsg, never leaking to the app.
 //
 // These vars hold the *active* palette and are mutable: the settings
 // dialog calls SetPalette() to swap them, then DefaultStyles() rebuilds
@@ -28,6 +30,7 @@ var (
 	colMuted     color.Color
 	colText      color.Color
 	colBorder    color.Color
+	colOnAccent  color.Color
 	colLogoTop   color.Color
 	colLogoBot   color.Color
 	colLogoVer   color.Color
@@ -51,6 +54,10 @@ func SetPalette(p Palette) {
 	colMuted = p.Muted
 	colText = p.Text
 	colBorder = p.Border
+	colOnAccent = p.OnAccent
+	if colOnAccent == nil {
+		colOnAccent = p.Text // legacy fallback for any caller that constructs a Palette without OnAccent
+	}
 	colLogoTop = p.LogoTop
 	colLogoBot = p.LogoBot
 	colLogoVer = p.LogoVer
@@ -165,7 +172,7 @@ func DefaultStyles() Styles {
 		LogoBrand: lipgloss.NewStyle().Foreground(colMuted).Italic(true),
 
 		BtnSelected: lipgloss.NewStyle().
-			Foreground(colText).
+			Foreground(colOnAccent).
 			Background(colPrimary).
 			Bold(true).
 			Padding(0, 2),
@@ -174,7 +181,7 @@ func DefaultStyles() Styles {
 			Padding(0, 2),
 
 		SelectModeBadge: lipgloss.NewStyle().
-			Foreground(colText).
+			Foreground(colOnAccent).
 			Background(colSecondary).
 			Bold(true).
 			Padding(0, 1),

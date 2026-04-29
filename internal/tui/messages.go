@@ -51,3 +51,9 @@ type sysStatsResultMsg struct {
 // granular saveState() calls scattered through Update only mark dirty;
 // this is what actually pays the I/O cost.
 type saveTickMsg struct{}
+
+// bgPollMsg fires periodically to re-ask the terminal for its current
+// background color. Together with the startup query and the resize-time
+// query in the model, this catches macOS appearance changes (Ghostty
+// updates its bg) within ~30s without paying for sub-second polling.
+type bgPollMsg struct{}

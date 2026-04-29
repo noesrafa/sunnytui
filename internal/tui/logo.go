@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-const Version = "0.10.1"
+const Version = "0.11.0"
 
 // Dot-matrix SUNNY: each letter is a 5×5 logical pixel grid where every
 // "pixel" is half a terminal cell tall. We pack two logical rows into one

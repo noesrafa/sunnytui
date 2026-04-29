@@ -54,7 +54,8 @@ type Model struct {
 	initialCwd    string
 	defaultModel  string
 	defaultEffort string
-	themeID       string // active theme; persisted in state.json
+	themeID       string // active theme id (may be AutoThemeID); persisted in state.json
+	bgIsLight     bool   // last known terminal background polarity, refreshed via tea.BackgroundColorMsg
 	skipPerms     bool
 	lastErr       error
 
@@ -127,10 +128,17 @@ const (
 
 func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts Options) Model {
 	// Apply the persisted theme before building styles so every Style picks
-	// up the right palette on first render. Unknown IDs fall back to the
-	// default theme.
-	theme := ThemeByID(opts.InitialTheme)
-	SetPalette(theme.P)
+	// up the right palette on first render. Empty/unknown IDs fall back to
+	// Auto so fresh installs follow the terminal background out of the box.
+	themeID := opts.InitialTheme
+	if themeID == "" {
+		themeID = AutoThemeID
+	}
+	// Resolve Auto with bgIsLight=false at startup; the real background
+	// arrives via tea.BackgroundColorMsg once the program is running and
+	// repaint() will re-resolve if the terminal turns out to be light.
+	resolved := ResolveTheme(themeID, false)
+	SetPalette(resolved.P)
 	st := DefaultStyles()
 	km := DefaultKeyMap()
 
@@ -210,7 +218,7 @@ func NewModel(ctx context.Context, mgr *session.Manager, initialCwd string, opts
 		initialCwd:    initialCwd,
 		defaultModel:  defModel,
 		defaultEffort: defEffort,
-		themeID:       theme.ID,
+		themeID:       themeID,
 		skipPerms:     opts.DangerousSkipPermissions,
 	}
 }
@@ -220,7 +228,14 @@ func (m Model) Init() tea.Cmd {
 	// list-based chat is cheap enough now that we don't need to gate the
 	// logo animation on activity — visually you always see the brand mark
 	// breathing.
-	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd()}
+	//
+	// tea.RequestBackgroundColor asks the terminal for its bg via OSC 11.
+	// Bubbletea's input parser owns the response and surfaces it as
+	// tea.BackgroundColorMsg, so we never have to worry about it leaking
+	// to the textarea. bgPollCmd re-asks every 30s so macOS appearance
+	// changes (Ghostty updates bg in lockstep) flip Auto themes within
+	// half a minute without sub-second polling overhead.
+	cmds := []tea.Cmd{textarea.Blink, branchTickCmd(), logoTickCmd(), sysStatsSampleCmd(), sysStatsTickCmd(), saveTickCmd(), tea.RequestBackgroundColor, bgPollCmd()}
 	if m.anyThinking() {
 		cmds = append(cmds, m.spinner.Tick)
 	}
@@ -469,6 +484,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.applyResize(msg)
+		// Some terminals (Ghostty included) flush a resize when the OS
+		// appearance changes. Re-asking for bg here means Auto mode flips
+		// before the next 30s poll fires.
+		cmds = append(cmds, tea.RequestBackgroundColor)
 	case tea.KeyMsg:
 		next, cmd, handled := m.updateKey(msg)
 		if handled {
@@ -512,6 +531,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flushState()
 		}
 		cmds = append(cmds, saveTickCmd())
+	case tea.BackgroundColorMsg:
+		// Terminal told us its current background. If polarity flipped and
+		// we're in Auto mode, repaint to swap dark↔light. We do not
+		// repaint when the user has picked a concrete theme — that's an
+		// explicit override.
+		nowLight := !msg.IsDark()
+		if nowLight != m.bgIsLight {
+			m.bgIsLight = nowLight
+			if m.themeID == AutoThemeID {
+				m.repaint(AutoThemeID)
+			}
+		}
+	case bgPollMsg:
+		// Re-ask the terminal so macOS theme switches (Ghostty repaints
+		// its bg) propagate without a restart. Cheap: ~30 OSC 11 round
+		// trips per minute is rounding error.
+		cmds = append(cmds, tea.RequestBackgroundColor, bgPollCmd())
 	}
 
 	if !m.overlay.HasOpen() && !pasteHandled {
@@ -687,6 +723,13 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 // repaint swaps the active palette and re-applies it everywhere a Style
 // got copied at construction time. Called by all three settings flows
 // (preview, apply, cancel); only apply also closes the overlay and saves.
+// Also called from the tea.BackgroundColorMsg handler when Auto mode
+// needs to flip dark↔light.
+//
+// The id passed in is the *user-facing* selection (may be AutoThemeID).
+// We resolve it through ResolveTheme so Auto picks the right concrete
+// palette based on the most recent terminal-bg reading, but persist the
+// original id so the user's "follow terminal" choice survives restarts.
 //
 //   - m.styles is fully rebuilt from the new palette globals.
 //   - The textarea owns its own Styles struct; without re-applying it,
@@ -698,10 +741,10 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 //   - Glamour bakes ANSI codes into its output; m.md + m.mdCache are
 //     thrown away so transcripts re-render against the new palette.
 func (m *Model) repaint(id string) {
-	t := ThemeByID(id)
+	t := ResolveTheme(id, m.bgIsLight)
 	SetPalette(t.P)
 	m.styles = DefaultStyles()
-	m.themeID = t.ID
+	m.themeID = id
 
 	m.textarea.SetStyles(m.styles.EditorTextarea)
 	m.spinner.Style = lipgloss.NewStyle().Foreground(colWarning)
@@ -1223,6 +1266,14 @@ func branchTickCmd() tea.Cmd {
 // terminals. Each tick increments Model.logoFrame and re-arms itself.
 func logoTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return logoTickMsg{} })
+}
+
+// bgPollCmd schedules the next terminal-background re-query. 30s cadence
+// is fast enough that flipping macOS appearance feels "instant" (Ghostty
+// repaints its bg the moment the system event fires) without spamming
+// OSC 11 round trips on idle sessions.
+func bgPollCmd() tea.Cmd {
+	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return bgPollMsg{} })
 }
 
 // sysStatsTickCmd is the metronome for CPU/RAM sampling. Each tick spawns
