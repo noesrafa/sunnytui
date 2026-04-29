@@ -66,7 +66,11 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 	if len(v.Input) > 0 {
 		inputBudget := ctx.Width - lipgloss.Width(header) - 2
 		if inputBudget > 8 {
-			header += " " + s.ToolInput.Render(compactJSON(v.Input, inputBudget))
+			// linkify after compactJSON: compactJSON byte-slices when over
+			// budget, which would shred an OSC 8 escape if linkify ran
+			// first. URLs that survive untouched still click; truncated
+			// ones render as plain text.
+			header += " " + s.ToolInput.Render(linkify(compactJSON(v.Input, inputBudget)))
 		}
 	}
 	if !v.Done {
@@ -88,6 +92,10 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 	// those out via highlight.Apply's ScreenBuffer, which is why the
 	// transcript looked "wider" while the user was dragging — same content,
 	// just without the spurious blanks.
+	//
+	// linkify per-line AFTER truncation so the byte-slice in truncateLines
+	// can't split an OSC 8 escape mid-sequence. Lines whose URL got cut
+	// by the width clamp simply render as plain text — acceptable.
 	bodyLines := strings.Split(body, "\n")
 	indentLead := s.ToolPrompt.Render("  ↳ ")
 	indentRest := "    " // 4 spaces, same width as "  ↳ "
@@ -98,7 +106,7 @@ func renderToolUse(v session.ToolUseItem, ctx RenderContext) string {
 		if i == 0 {
 			prefix = indentLead
 		}
-		rendered = append(rendered, prefix+bodyStyle.Render(ln))
+		rendered = append(rendered, prefix+bodyStyle.Render(linkify(ln)))
 	}
 	return strings.Join(rendered, "\n")
 }

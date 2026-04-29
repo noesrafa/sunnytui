@@ -208,7 +208,10 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 		// palette's text color — Fallout's phosphor green, Whisper's near
 		// white, etc. Without this the user text renders in the terminal
 		// default foreground regardless of theme.
-		body := s.UserText.Render(wrap(v.Text, ctx.Width-1))
+		// linkify before wrap so the URL regex sees an unbroken string.
+		// wordwrap treats the OSC 8 sequence as a single token (lipgloss
+		// width-counts only the visible glyphs), so the link stays intact.
+		body := s.UserText.Render(wrap(linkify(v.Text), ctx.Width-1))
 		if len(v.Attachments) > 0 {
 			lines := make([]string, 0, len(v.Attachments)+1)
 			lines = append(lines, body)
@@ -230,20 +233,25 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 		return s.AssistantText.Render(wrap(v.Text, ctx.Width-1))
 
 	case session.ThinkingItem:
-		return s.AssistantThink.Render(wrap(v.Text, ctx.Width-1))
+		return s.AssistantThink.Render(wrap(linkify(v.Text), ctx.Width-1))
 
 	case session.ToolUseItem:
 		return renderToolUse(v, withWidth(ctx, ctx.Width))
 
 	case session.ToolResultItem:
-		preview := truncateLines(v.Content, 6, ctx.Width-2)
+		// linkify AFTER truncate: truncateLines slices by bytes, which
+		// would shred an OSC 8 escape mid-sequence. URLs that survive
+		// the truncation untouched still get clickable; ones cut by the
+		// width clamp render as plain text (acceptable tradeoff vs.
+		// rewriting truncateLines to be ANSI-aware).
+		preview := linkify(truncateLines(v.Content, 6, ctx.Width-2))
 		return s.ToolResult.Render("↳ " + preview)
 
 	case session.EmptyResponseItem:
 		return s.Hint.Render("(sin respuesta)")
 
 	case session.ErrorItem:
-		return s.ResultError.Render("✗ " + v.Message)
+		return s.ResultError.Render("✗ " + linkify(v.Message))
 
 	case session.ResultItem:
 		modelName := simplifyModelName(ctx.ModelName)
