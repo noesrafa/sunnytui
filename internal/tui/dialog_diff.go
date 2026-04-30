@@ -88,6 +88,8 @@ func NewDiffDialog(cwd, branch string, changes session.ChangeStats, s Styles) *D
 	return d
 }
 
+func (d *DiffDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *DiffDialog) Init() tea.Cmd { return nil }
 
 func (d *DiffDialog) Update(msg tea.Msg) tea.Cmd {

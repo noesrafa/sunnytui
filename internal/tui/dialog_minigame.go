@@ -45,6 +45,8 @@ func NewMinigameDialog(s Styles) *MinigameDialog {
 	return &MinigameDialog{styles: s, game: pick()}
 }
 
+func (d *MinigameDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *MinigameDialog) Init() tea.Cmd { return d.game.Init() }
 
 func (d *MinigameDialog) Update(msg tea.Msg) tea.Cmd {

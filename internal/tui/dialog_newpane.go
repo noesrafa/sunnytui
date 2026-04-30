@@ -43,6 +43,8 @@ func NewNewPaneDialog(defaultCwd string, s Styles) *NewPaneDialog {
 	}
 }
 
+func (d *NewPaneDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *NewPaneDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *NewPaneDialog) Update(msg tea.Msg) tea.Cmd {

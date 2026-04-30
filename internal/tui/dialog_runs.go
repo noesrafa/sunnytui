@@ -23,6 +23,8 @@ func NewRunsDialog(mgr *runs.Manager, s Styles) *RunsDialog {
 	return &RunsDialog{mgr: mgr, styles: s}
 }
 
+func (d *RunsDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *RunsDialog) Init() tea.Cmd { return nil }
 
 func (d *RunsDialog) Update(msg tea.Msg) tea.Cmd {

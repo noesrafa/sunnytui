@@ -73,6 +73,15 @@ func buildThemeEntries() []themeEntry {
 	return out
 }
 
+// SetStyles refreshes the cached Styles when the root model rebuilds the
+// palette mid-preview. Without this the dialog box keeps painting in the
+// theme it was constructed with while the chat behind it already swapped.
+func (d *SettingsDialog) SetStyles(s Styles) { d.styles = s }
+
+// SetBgIsLight refreshes the polarity used to resolve the per-row swatches
+// so they match what the user would actually see if they applied that row.
+func (d *SettingsDialog) SetBgIsLight(bgIsLight bool) { d.bgIsLight = bgIsLight }
+
 func (d *SettingsDialog) Init() tea.Cmd { return nil }
 
 func (d *SettingsDialog) Update(msg tea.Msg) tea.Cmd {

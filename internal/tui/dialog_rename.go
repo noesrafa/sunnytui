@@ -24,6 +24,8 @@ func NewRenameDialog(currentTitle string, s Styles) *RenameDialog {
 	return &RenameDialog{input: ti, current: currentTitle, styles: s}
 }
 
+func (d *RenameDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *RenameDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *RenameDialog) Update(msg tea.Msg) tea.Cmd {

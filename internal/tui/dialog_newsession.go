@@ -134,6 +134,8 @@ func (d *NewSessionDialog) ascend() {
 	}
 }
 
+func (d *NewSessionDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *NewSessionDialog) Init() tea.Cmd {
 	return textinput.Blink
 }

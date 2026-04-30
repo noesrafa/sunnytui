@@ -57,7 +57,7 @@ type Run struct {
 
 func (r *Run) initLogs() {
 	if r.Logs == nil {
-		r.Logs = NewLogBuffer(500)
+		r.Logs = NewLogBuffer(DefaultLogBufferLines)
 	}
 }
 

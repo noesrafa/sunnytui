@@ -2,6 +2,12 @@ package runs
 
 import "sync"
 
+// DefaultLogBufferLines is the per-run scrollback ceiling. Long-running
+// dev servers (next dev, vitest --watch, tailwind --watch) trash 500
+// quickly, and the user wants meaningful history when something blew
+// up minutes ago.
+const DefaultLogBufferLines = 5000
+
 // LogBuffer is a ring buffer of recent log lines for a single Run. Safe for
 // concurrent appends from the stdout/stderr capture goroutines while the UI
 // reads via Snapshot.
@@ -13,7 +19,7 @@ type LogBuffer struct {
 
 func NewLogBuffer(max int) *LogBuffer {
 	if max <= 0 {
-		max = 500
+		max = DefaultLogBufferLines
 	}
 	return &LogBuffer{max: max, lines: make([]string, 0, max)}
 }

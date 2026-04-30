@@ -45,6 +45,13 @@ func NewStream(ctx context.Context, opts StreamOpts) (*Stream, error) {
 	}
 	if opts.DangerousSkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
+		// Even with skip-permissions, claude sandboxes file writes / Bash
+		// path access to the session's cwd by default. Allowing $HOME
+		// lets the user touch dotfiles, ~/.claude/skills, etc. from any
+		// session without having to spawn it from the matching cwd.
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			args = append(args, "--add-dir", home)
+		}
 	}
 	if opts.SessionID != "" {
 		args = append(args, "--resume", opts.SessionID)

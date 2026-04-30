@@ -33,6 +33,8 @@ func NewRunLogsDialog(r *runs.Run, s Styles) *RunLogsDialog {
 	return &RunLogsDialog{run: r, vp: vp, follow: true, styles: s}
 }
 
+func (d *RunLogsDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *RunLogsDialog) Init() tea.Cmd { return nil }
 
 func (d *RunLogsDialog) Update(msg tea.Msg) tea.Cmd {

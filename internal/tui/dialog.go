@@ -52,6 +52,42 @@ func (o *Overlay) ViewTop(width, height int) string {
 	return o.stack[len(o.stack)-1].View(width, height)
 }
 
+// StyleAware is implemented by dialogs that cache a copy of the root
+// model's Styles at construction time. The root calls RefreshStyles after
+// a theme swap so open dialogs (notably the live-preview SettingsDialog)
+// repaint with the new palette instead of staying frozen on the colors
+// they were built with.
+type StyleAware interface {
+	SetStyles(s Styles)
+}
+
+// BgAware is for dialogs that render polarity-dependent content (e.g. the
+// SettingsDialog's swatches, which preview each flavor under the live
+// terminal background). Updated when tea.BackgroundColorMsg flips bg.
+type BgAware interface {
+	SetBgIsLight(bgIsLight bool)
+}
+
+// RefreshStyles propagates a fresh Styles copy into every open dialog that
+// cares (StyleAware). Cheap no-op for dialogs that don't implement it.
+func (o *Overlay) RefreshStyles(s Styles) {
+	for _, d := range o.stack {
+		if sa, ok := d.(StyleAware); ok {
+			sa.SetStyles(s)
+		}
+	}
+}
+
+// RefreshBgIsLight notifies every BgAware dialog that the terminal bg
+// polarity changed, so previews and swatches re-resolve.
+func (o *Overlay) RefreshBgIsLight(bgIsLight bool) {
+	for _, d := range o.stack {
+		if ba, ok := d.(BgAware); ok {
+			ba.SetBgIsLight(bgIsLight)
+		}
+	}
+}
+
 // CloseDialogMsg dismisses the top dialog.
 type CloseDialogMsg struct{}
 

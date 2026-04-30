@@ -532,16 +532,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, saveTickCmd())
 	case tea.BackgroundColorMsg:
-		// Terminal told us its current background. If polarity flipped and
-		// we're in Auto mode, repaint to swap dark↔light. We do not
-		// repaint when the user has picked a concrete theme — that's an
-		// explicit override.
+		// Terminal told us its current background. Every paired theme
+		// auto-flips dark↔light when the polarity changes (ResolveTheme
+		// handles the swap), so we repaint unconditionally — not just on
+		// AutoThemeID. Without this, switching macOS appearance leaves
+		// the user staring at e.g. dark Tokyo Night on a freshly-light
+		// terminal until they re-pick the theme manually.
 		nowLight := !msg.IsDark()
 		if nowLight != m.bgIsLight {
 			m.bgIsLight = nowLight
-			if m.themeID == AutoThemeID {
-				m.repaint(AutoThemeID)
-			}
+			m.repaint(m.themeID)
 		}
 	case bgPollMsg:
 		// Re-ask the terminal so macOS theme switches (Ghostty repaints
@@ -681,11 +681,12 @@ func (m Model) updateAppMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 		}
 		return m, nil, true
 	case paneClosedMsg:
-		if m.panes != nil {
-			m.panes.Close(v.PaneID)
-			if m.panes.Len() == 0 {
-				m.activeKind = activeClaude
-			}
+		// Process exited (clean exit, crash, or user pressed ctrl+c). Keep
+		// the pane in the slice so the user can still read whatever the
+		// process printed before dying — only ctrl+w removes it. The
+		// sidebar already shows the dead state via "□".
+		if v.Err != nil {
+			m.logger.Debug("pane exited", "id", v.PaneID, "err", v.Err)
 		}
 		return m, nil, true
 	case CreateSessionMsg:
@@ -754,6 +755,14 @@ func (m *Model) repaint(id string) {
 
 	m.md = nil
 	m.mdCache = nil
+
+	// Open dialogs (notably SettingsDialog mid-preview) cache a Styles
+	// copy at construction. Without propagating the rebuilt palette they
+	// keep painting in the previous theme until the user closes & reopens
+	// them — that's the "I had to cycle several themes" symptom.
+	m.overlay.RefreshStyles(m.styles)
+	m.overlay.RefreshBgIsLight(m.bgIsLight)
+
 	m.refreshViewport()
 }
 

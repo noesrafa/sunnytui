@@ -37,11 +37,11 @@ func TestLogBuffer_RingTrimsOldest(t *testing.T) {
 
 func TestLogBuffer_DefaultMax(t *testing.T) {
 	b := NewLogBuffer(0)
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < DefaultLogBufferLines+100; i++ {
 		b.Append(strconv.Itoa(i))
 	}
-	if l := b.Len(); l != 500 {
-		t.Errorf("len = %d, want 500 (default max)", l)
+	if l := b.Len(); l != DefaultLogBufferLines {
+		t.Errorf("len = %d, want %d (default max)", l, DefaultLogBufferLines)
 	}
 }
 

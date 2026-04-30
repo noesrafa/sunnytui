@@ -46,6 +46,8 @@ func NewTilePickerDialog(items []TileItem, s Styles) *TilePickerDialog {
 	return d
 }
 
+func (d *TilePickerDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *TilePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *TilePickerDialog) Update(msg tea.Msg) tea.Cmd {

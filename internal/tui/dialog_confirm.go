@@ -28,6 +28,8 @@ func NewConfirmDialog(s Styles, title string, body []string, confirm tea.Msg) *C
 	}
 }
 
+func (d *ConfirmDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *ConfirmDialog) Init() tea.Cmd { return nil }
 
 func (d *ConfirmDialog) Update(msg tea.Msg) tea.Cmd {

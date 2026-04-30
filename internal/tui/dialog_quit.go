@@ -24,6 +24,8 @@ func NewQuitDialog(s Styles, sessions int, anyThinking bool) *QuitDialog {
 	}
 }
 
+func (d *QuitDialog) SetStyles(s Styles) { d.styles = s }
+
 func (d *QuitDialog) Init() tea.Cmd { return nil }
 
 func (d *QuitDialog) Update(msg tea.Msg) tea.Cmd {

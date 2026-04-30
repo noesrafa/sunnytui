@@ -55,6 +55,15 @@ func NewRunEditDialog(defaultCwd string, s Styles) *RunEditDialog {
 	return d
 }
 
+// SetStyles refreshes the cached palette and propagates to the embedded
+// dirpicker, which keeps its own copy.
+func (d *RunEditDialog) SetStyles(s Styles) {
+	d.styles = s
+	if d.cwd != nil {
+		d.cwd.setStyles(s)
+	}
+}
+
 func (d *RunEditDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *RunEditDialog) Update(msg tea.Msg) tea.Cmd {

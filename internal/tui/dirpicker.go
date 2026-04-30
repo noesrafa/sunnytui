@@ -52,6 +52,11 @@ func (p *dirPicker) Cwd() string { return p.cwd }
 func (p *dirPicker) Focus() tea.Cmd { return p.search.Focus() }
 func (p *dirPicker) Blur()          { p.search.Blur() }
 
+// setStyles is called by parent dialogs after a theme swap so the picker
+// repaints with the new palette instead of staying frozen on the colors
+// it captured at construction.
+func (p *dirPicker) setStyles(s Styles) { p.styles = s }
+
 // SetSearchWidth lets parents resize the embedded search box on layout.
 func (p *dirPicker) SetSearchWidth(w int) { p.search.SetWidth(w) }
 
