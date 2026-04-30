@@ -259,6 +259,35 @@ func (s *Session) Cancel() error {
 	return s.Stream.Cancel()
 }
 
+// Resume spawns a fresh claude subprocess attached to this session's
+// RemoteID (claude --resume), replacing s.Stream. Used when the previous
+// stream died — typically because the user hit ctrl+c and claude exited
+// instead of cleanly aborting the turn — so the user can keep chatting in
+// the same session without losing the transcript or context.
+//
+// Caller is responsible for re-arming the events-channel reader (the TUI
+// does this via waitForSession) since the channel identity changed.
+func (s *Session) Resume(ctx context.Context, skipPerms bool) error {
+	stream, err := claude.NewStream(ctx, claude.StreamOpts{
+		Cwd:                      s.Cwd,
+		Model:                    s.Model,
+		Effort:                   s.Effort,
+		DangerousSkipPermissions: skipPerms,
+		SessionID:                s.RemoteID,
+	})
+	if err != nil {
+		return err
+	}
+	s.Stream = stream
+	if s.State == StateError || s.State == StateThinking {
+		s.State = StateIdle
+	}
+	s.LastErr = nil
+	s.turnHadOutput = false
+	s.logger.Info("session resumed", "remote_id", s.RemoteID)
+	return nil
+}
+
 // Send dispatches a user turn. Caller must check State == StateIdle;
 // otherwise ErrSessionBusy is returned without side effects.
 //

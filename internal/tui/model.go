@@ -502,11 +502,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (e.g. after Ctrl+R reset the claude process). Otherwise the old
 		// goroutine would fire sessionClosedMsg when its channel drains and
 		// we'd incorrectly tear down the freshly-restarted session.
-		if sess := m.manager.ByID(msg.SessionID); sess == nil || (msg.Stream != nil && sess.Stream != msg.Stream) {
+		sess := m.manager.ByID(msg.SessionID)
+		if sess == nil || (msg.Stream != nil && sess.Stream != msg.Stream) {
 			break
 		}
-		m.manager.Close(msg.SessionID)
+		// Stream died (claude exited from our SIGINT, EOF, or crash). Don't
+		// remove the session from the manager — only ctrl+w deletes a tab.
+		// We null out Stream so handleSend knows to Resume on the next turn.
+		// State drops to Idle (or stays Error if the stream errored out)
+		// so the textarea isn't locked.
+		sess.Stream = nil
+		if sess.State == session.StateThinking {
+			sess.State = session.StateIdle
+		}
 		m.refreshViewport()
+		m.saveState()
 	case spinner.TickMsg:
 		next, cmd := m.handleSpinnerTick(msg)
 		m = next
@@ -1199,6 +1209,26 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	if text == "" {
 		return m, nil
 	}
+
+	// If the previous stream died (typically because the user hit ctrl+c
+	// during a turn and claude exited instead of cleanly aborting), the
+	// session lives on in the manager with Stream == nil. Spawn a fresh
+	// claude --resume <session_id> so the conversation continues without
+	// the user having to recreate the tab.
+	var resumed tea.Cmd
+	if cur.Stream == nil {
+		if err := cur.Resume(m.ctx, m.skipPerms); err != nil {
+			cur.LastErr = err
+			cur.State = session.StateError
+			m.logger.Error("session resume failed", "err", err, "session", cur.ID)
+			m.refreshViewport()
+			return m, nil
+		}
+		// Re-arm the events reader against the new stream so its emitted
+		// events (and eventual close) get routed back into Update.
+		resumed = waitForSession(cur)
+	}
+
 	m.textarea.Reset()
 	cur.Draft = ""
 	if err := cur.Send(text); err != nil {
@@ -1210,7 +1240,7 @@ func (m Model) handleSend() (Model, tea.Cmd) {
 	// Kick off the spinner tick chain and the morphing-string anim — both
 	// die when the session goes idle. The logo tick lives independently
 	// (always running) so we don't need to resurrect it here.
-	return m, tea.Batch(m.spinner.Tick, m.thinkingAnim.Step())
+	return m, tea.Batch(resumed, m.spinner.Tick, m.thinkingAnim.Step())
 }
 
 func (m *Model) handleSessionEvent(msg sessionEventMsg) tea.Cmd {
@@ -1277,12 +1307,15 @@ func logoTickCmd() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg { return logoTickMsg{} })
 }
 
-// bgPollCmd schedules the next terminal-background re-query. 30s cadence
-// is fast enough that flipping macOS appearance feels "instant" (Ghostty
-// repaints its bg the moment the system event fires) without spamming
-// OSC 11 round trips on idle sessions.
+// bgPollCmd schedules the next terminal-background re-query. 3s is the
+// shortest delay that still feels lazy on the wire (~20 OSC 11 round
+// trips per minute, each is a few bytes) but short enough that flipping
+// macOS appearance feels effectively instant — without it the user
+// stares at the wrong-polarity TUI for up to half a minute. Resize and
+// the explicit `tea.RequestBackgroundColor` on startup also drive
+// re-queries so this cadence is just the safety net.
 func bgPollCmd() tea.Cmd {
-	return tea.Tick(30*time.Second, func(time.Time) tea.Msg { return bgPollMsg{} })
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return bgPollMsg{} })
 }
 
 // sysStatsTickCmd is the metronome for CPU/RAM sampling. Each tick spawns
