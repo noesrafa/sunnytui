@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 
+	"github.com/noesrafa/sunnytui/internal/autoupdate"
 	"github.com/noesrafa/sunnytui/internal/claude"
 	"github.com/noesrafa/sunnytui/internal/logger"
 	"github.com/noesrafa/sunnytui/internal/runs"
@@ -241,6 +242,10 @@ func runChat(args []string) error {
 	lg, closer := logger.Setup("sunnytui")
 	defer closer.Close()
 	lg.Info("chat starting", "cwd", cwd, "model", model, "effort", effort, "log", logger.LogPath())
+
+	// Background brew upgrade if installed via Homebrew. No-op for source
+	// builds. Throttled to 6h so quick re-launches don't spam brew.
+	autoupdate.MaybeRunInBackground(lg)
 
 	mgr := session.NewManager()
 	paneMgr := terminal.NewManager()
