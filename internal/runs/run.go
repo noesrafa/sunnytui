@@ -51,8 +51,9 @@ type Run struct {
 	LastErr   error      `json:"-"`
 	Logs      *LogBuffer `json:"-"`
 
-	mu  sync.Mutex
-	cmd *exec.Cmd
+	mu   sync.Mutex
+	cmd  *exec.Cmd
+	done chan struct{} // closed by wait() when the process exits
 }
 
 func (r *Run) initLogs() {
@@ -130,6 +131,7 @@ func (r *Run) Start() error {
 	}
 
 	r.cmd = cmd
+	r.done = make(chan struct{})
 	r.Status = StatusRunning
 	r.StartedAt = time.Now()
 	r.ExitCode = 0
@@ -156,14 +158,17 @@ func (r *Run) captureLines(rd io.ReadCloser) {
 func (r *Run) wait() {
 	r.mu.Lock()
 	cmd := r.cmd
+	done := r.done
 	r.mu.Unlock()
 	if cmd == nil {
+		if done != nil {
+			close(done)
+		}
 		return
 	}
 	err := cmd.Wait()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.Logs.Append(fmt.Sprintf("──── exited %s ────", time.Now().Format("15:04:05")))
 	if err != nil {
 		r.LastErr = err
@@ -180,10 +185,14 @@ func (r *Run) wait() {
 		r.Status = StatusStopped
 	}
 	r.cmd = nil
+	r.mu.Unlock()
+	close(done)
 }
 
 // Stop sends SIGTERM to the process group. Falls back to SIGKILL after a
-// short grace period if the process refuses to exit.
+// short grace period if the process refuses to exit. Returns when wait()
+// has observed the exit and updated state — so callers know runtime fields
+// (ExitCode, Status) reflect the kill by the time Stop returns.
 func (r *Run) Stop() error {
 	r.mu.Lock()
 	cmd := r.cmd
@@ -193,6 +202,7 @@ func (r *Run) Stop() error {
 	}
 	r.Status = StatusStopped // mark intent so wait() doesn't flip to Crashed
 	pid := cmd.Process.Pid
+	done := r.done
 	r.mu.Unlock()
 
 	// Negative PID targets the whole process group.
@@ -200,17 +210,19 @@ func (r *Run) Stop() error {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
 
-	// Grace: 2s for graceful exit, then SIGKILL.
-	done := make(chan struct{})
-	go func() {
-		_, _ = cmd.Process.Wait()
-		close(done)
-	}()
+	// Grace: 2s for graceful exit, then SIGKILL. We observe the existing
+	// wait() goroutine via the done channel rather than calling
+	// cmd.Process.Wait() ourselves — concurrent Wait calls on the same
+	// Process produce "wait already called" errors and burn cycles.
+	if done == nil {
+		return nil
+	}
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		_ = syscall.Kill(pid, syscall.SIGKILL)
+		<-done
 	}
 	return nil
 }
