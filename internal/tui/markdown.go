@@ -5,7 +5,26 @@ import (
 	"image/color"
 
 	"charm.land/glamour/v2/ansi"
+	"github.com/alecthomas/chroma/v2/styles"
 )
+
+// glamourChromaTheme is the name glamour hardcodes when it registers the
+// chroma syntax-highlight style derived from our StyleConfig. It lives in
+// chroma's *global* styles.Registry, so the first render of the session
+// wins: subsequent glamour.NewTermRenderer calls find the entry already
+// present and skip re-registration. That's the bug behind "code blocks
+// stay frozen on the first theme" — switching to light leaves variable
+// names painted in the dark palette's colText (#DFDBDD), which renders
+// as near-white on a light terminal and becomes invisible. We clear the
+// entry every time we rebuild the renderer so the new palette wins.
+const glamourChromaTheme = "charm"
+
+// resetChromaStyle drops glamour's cached chroma style from the global
+// registry. Call this right before glamour.NewTermRenderer so the new
+// palette gets re-registered instead of being silently ignored.
+func resetChromaStyle() {
+	delete(styles.Registry, glamourChromaTheme)
+}
 
 // markdownStyleConfig builds a glamour ansi.StyleConfig derived from the
 // active palette globals (colPrimary, colSecondary, colMuted, …). Glamour's

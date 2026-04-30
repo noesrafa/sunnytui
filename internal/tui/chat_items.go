@@ -225,9 +225,6 @@ func RenderItemRaw(it session.Item, ctx RenderContext) string {
 
 	case session.AssistantTextItem:
 		if ctx.Markdown != nil {
-			// Markdown gets glamour's dark style (palette-agnostic by
-			// design — re-themeing glamour is a deeper change). Plain
-			// text fallback DOES follow the active palette.
 			return strings.TrimSuffix(ctx.Markdown(v.Text), "\n")
 		}
 		return s.AssistantText.Render(wrap(v.Text, ctx.Width-1))

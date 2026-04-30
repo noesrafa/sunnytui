@@ -698,6 +698,9 @@ func (m *Model) markdown(text string) string {
 	}
 	if m.md == nil || m.mdW != w {
 		m.mdCache = nil
+		// Force chroma to re-register its style under the active palette.
+		// See resetChromaStyle for why glamour caches it globally.
+		resetChromaStyle()
 		r, err := glamour.NewTermRenderer(
 			// Themed style derived from the active palette, so headers,
 			// links, code, syntax highlighting, etc. all swap with ctrl+s.
